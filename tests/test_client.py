@@ -16,11 +16,12 @@ async def test_get_language_enum(client):
     """测试获取语言列表"""
     # Mock HTTP 响应
     mock_response = MagicMock()
+    # 上游按界面语言返回多份等价的语种表
     mock_response.json.return_value = {
         "code": 0,
         "data": {
-            "en": "English",
-            "zh-CN": "Chinese",
+            "en": {"en": "English", "zh-CN": "Simplified Chinese"},
+            "zh": {"en": "英语", "zh-CN": "简体中文"},
         }
     }
     mock_response.raise_for_status = MagicMock()
@@ -31,7 +32,37 @@ async def test_get_language_enum(client):
     result = await client.get_language_enum()
     client.client.post.assert_awaited_once()
     assert result["code"] == 0
-    assert "en" in result["data"]
+    # 只保留一份语种表，避免把 9 份等价数据塞进调用方上下文
+    assert result["displayLocale"] == "zh"
+    assert result["data"] == {"en": "英语", "zh-CN": "简体中文"}
+
+
+@pytest.mark.asyncio
+async def test_get_language_enum_display_locale(client):
+    """指定界面语言时返回对应的那一份"""
+    def fresh_response():
+        # 每次调用返回全新的对象：真实场景下每个响应都会重新解析 JSON
+        r = MagicMock()
+        r.json.return_value = {
+            "code": 0,
+            "data": {
+                "en": {"zh-CN": "Simplified Chinese"},
+                "zh": {"zh-CN": "简体中文"},
+            }
+        }
+        r.raise_for_status = MagicMock()
+        return r
+    
+    client.client.post = AsyncMock(return_value=fresh_response())
+    result = await client.get_language_enum("en")
+    assert result["displayLocale"] == "en"
+    assert result["data"] == {"zh-CN": "Simplified Chinese"}
+    
+    # 不存在的界面语言回退到 zh
+    client.client.post = AsyncMock(return_value=fresh_response())
+    fallback = await client.get_language_enum("xx")
+    assert fallback["displayLocale"] == "zh"
+    assert fallback["data"] == {"zh-CN": "简体中文"}
 
 
 @pytest.mark.asyncio

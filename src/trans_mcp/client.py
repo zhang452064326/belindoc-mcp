@@ -59,11 +59,34 @@ class TranslationClient:
     
     # ============ 语言相关 ============
     
-    async def get_language_enum(self) -> dict:
-        """获取支持的语言列表"""
+    async def get_language_enum(self, display_locale: str = "zh") -> dict:
+        """获取支持的语言列表
+
+        上游按界面语言返回 9 份完全等价的语种表（同样的语言码，只是显示名不同），
+        全部返回会白白占掉上万字符的上下文。这里只保留其中一份。
+        """
         response = await self.client.post(f"{DOC_PREFIX}/getLanguageEnum", json={})
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        
+        data = result.get("data")
+        if isinstance(data, dict) and data:
+            # 语言码是各份共有的，显示名按 display_locale 选一份即可
+            for locale in (display_locale, "zh", "en"):
+                if locale in data:
+                    result["data"] = data[locale]
+                    result["displayLocale"] = locale
+                    break
+            else:
+                first = next(iter(data))
+                result["data"] = data[first]
+                result["displayLocale"] = first
+            result["msg"] = (
+                "键为语言码（用于 source_language / target_language），值为显示名。"
+                "AnyLanguage 表示自动识别源语言。"
+            )
+        
+        return result
     
     # ============ 模型相关 ============
     

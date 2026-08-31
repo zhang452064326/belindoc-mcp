@@ -29,8 +29,16 @@ def _to_json(result) -> str:
 TOOLS = [
     Tool(
         name="get_supported_languages",
-        description="获取支持的语言列表。请在调用 translate_document 之前调用此工具，让用户选择源语言和目标语言。",
-        inputSchema={"type": "object", "properties": {}}
+        description="获取支持的语言列表（语言码 -> 显示名）。请在调用 translate_document 之前调用此工具，让用户选择源语言和目标语言。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "display_locale": {
+                    "type": "string",
+                    "description": "显示名使用的界面语言，默认 zh。可选 en、zh、zh-Hant、ja、ko、fr、ru、de、ar"
+                }
+            }
+        }
     ),
     Tool(
         name="get_model_list",
@@ -364,7 +372,7 @@ TOOLS = [
 def build_tool_handlers(client: TranslationClient):
     """按传入的 client 构建工具处理器映射"""
     return {
-        "get_supported_languages": lambda args: client.get_language_enum(),
+        "get_supported_languages": lambda args: client.get_language_enum(args.get("display_locale", "zh")),
         "get_model_list": lambda args: client.get_model_list(),
         "upload_document": lambda args: client.doc_batch_presigned_upload_url(args["file_name_list"]),
         "upload_file": lambda args: client.upload_file(args["file_path"]),
