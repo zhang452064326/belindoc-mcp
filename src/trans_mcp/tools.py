@@ -39,7 +39,7 @@ TOOLS = [
     ),
     Tool(
         name="upload_document",
-        description="【极少使用】仅返回预签名 URL，本工具不会上传任何内容，调用方必须自己把文件 PUT 上去。只有在无法访问本地文件系统时才用它。文件在本机时一律用 upload_file——包括 translate_document 报错后需要重试的情况：那种情况下文件已经传好，直接重试 translate_document 即可，不要重新上传。",
+        description="获取预签名上传链接，由调用方自行上传。返回的 uploadCommand 是一条可直接执行的 curl 命令，只需替换其中的文件路径，其余（尤其是 Content-Disposition）必须原样保留，否则 S3 报 SignatureDoesNotMatch。适用于 MCP 服务部署在远程主机、服务端读不到你本机文件的场景。若服务端与文件在同一台机器，用 upload_file 更省事。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -54,7 +54,7 @@ TOOLS = [
     ),
     Tool(
         name="upload_file",
-        description="上传本地文件到翻译平台。传入本地路径即可，服务端自动完成预签名与上传，返回 objectKey。这是上传文件的唯一推荐方式，不要自行编写上传脚本。",
+        description="上传文件到翻译平台，传入路径即可，服务端自动完成预签名与上传并返回 objectKey。注意：读文件的是服务端进程，仅当 MCP 服务与文件在同一台机器时可用。若返回「服务端找不到路径」，说明服务部署在远程主机，换路径或复制到 /tmp 都无效，应改用 upload_document。",
         inputSchema={
             "type": "object",
             "properties": {

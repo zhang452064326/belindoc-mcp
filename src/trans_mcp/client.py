@@ -14,6 +14,32 @@ TRANSIENT_CODES = {"600"}
 VIDEO_PREFIX = "/external/videoTranslate"
 
 
+def _attach_upload_command(result: dict) -> None:
+    """给预签名结果补一条可直接执行的上传命令
+
+    Content-Disposition 必须与预签名时的取值逐字一致，否则 S3 返回
+    SignatureDoesNotMatch。这里直接给出正确形式，避免调用方自行拼错。
+    """
+    if result.get("code") != "200":
+        return
+    for item in result.get("data") or []:
+        url = item.get("persignedUploadUrl")
+        encoded = item.get("encodeFileName")
+        if not url or not encoded:
+            continue
+        item["contentDisposition"] = f"attachment; filename*=UTF-8''{encoded}"
+        item["uploadCommand"] = (
+            f"curl -X PUT --upload-file '<本机文件的完整路径>' "
+            f"-H \"Content-Disposition: attachment; filename*=UTF-8''{encoded}\" "
+            f"'{url}'"
+        )
+        item["uploadNote"] = (
+            "请原样执行 uploadCommand，只替换文件路径；"
+            "Content-Disposition 一个字符都不能改，否则 S3 会报 SignatureDoesNotMatch。"
+            "上传成功后用本条的 objectKey 作为 fileObjectKey 调 translate_document。"
+        )
+
+
 class TranslationClient:
     """翻译 API 客户端"""
     
@@ -73,7 +99,9 @@ class TranslationClient:
             json={"fileNameList": file_name_list}
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        _attach_upload_command(result)
+        return result
     
     async def upload_file(self, file_path: str) -> dict:
         """上传本地文件到翻译平台"""
@@ -83,8 +111,21 @@ class TranslationClient:
         file_name = os.path.basename(file_path)
         
         # 检查文件是否存在
+        # 注意：读文件的是服务端进程。客户端与服务端不在同一台机器时，
+        # 客户端的本地路径在这里必然不存在，且换路径重试没有意义。
         if not os.path.exists(file_path):
-            return {"code": "400", "msg": f"文件不存在: {file_path}"}
+            import socket
+            return {
+                "code": "400",
+                "msg": (
+                    f"服务端（主机 {socket.gethostname()}）找不到路径 {file_path}。"
+                    "如果 MCP 服务部署在另一台机器上，本工具读不到你本机的文件，"
+                    "换路径或复制到 /tmp 都无效。请改用 upload_document 获取预签名链接，"
+                    "然后按返回的 uploadCommand 原样执行上传（该命令的请求头必须与签名一致，"
+                    "不要改写）。"
+                ),
+                "data": {"serverHost": socket.gethostname(), "triedPath": file_path},
+            }
         
         # 获取预签名URL
         upload_info = await self.doc_batch_presigned_upload_url([file_name])
@@ -394,7 +435,9 @@ class TranslationClient:
             json={"fileNameList": file_name_list}
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        _attach_upload_command(result)
+        return result
     
     async def submit_video_translate(
         self,
