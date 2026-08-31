@@ -28,6 +28,15 @@ class TransMcpHttpServer:
         self.port = port
         self.server = Server("trans-mcp")
     
+    # upload_file 由服务端 open() 客户端给的路径，只在 stdio 模式（同机）成立。
+    # HTTP 模式的客户端不在本机，且可能经隧道/反代接入，来源地址不可信，
+    # 因此一律不暴露该工具。
+    HTTP_HIDDEN_TOOLS = {'upload_file'}
+    
+    @classmethod
+    def _visible_tools(cls, request):
+        return [t for t in TOOLS if t.name not in cls.HTTP_HIDDEN_TOOLS]
+    
     @staticmethod
     def _get_api_key(request):
         """从 Authorization: Bearer <key> 取 API Key"""
@@ -106,7 +115,7 @@ class TransMcpHttpServer:
                             "description": t.description,
                             "inputSchema": t.input_schema
                         }
-                        for t in TOOLS
+                        for t in self._visible_tools(request)
                     ]
                 }
                 return web.json_response({
@@ -118,6 +127,20 @@ class TransMcpHttpServer:
             elif method == "tools/call":
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
+                
+                if tool_name in self.HTTP_HIDDEN_TOOLS:
+                    return web.json_response({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {"content": [{"type": "text", "text": _to_json({
+                            "code": "400",
+                            "msg": (
+                                f"{tool_name} 由服务端读取本地路径，HTTP 模式下不可用"
+                                "（已从工具列表中隐藏）。请改用 upload_document 获取预签名链接，"
+                                "并原样执行其返回的 uploadCommand 完成上传。"
+                            ),
+                        })}]}
+                    })
                 
                 if tool_name in tool_handlers:
                     try:
@@ -197,7 +220,7 @@ class TransMcpHttpServer:
                             "description": t.description,
                             "inputSchema": t.input_schema
                         }
-                        for t in TOOLS
+                        for t in self._visible_tools(request)
                     ]
                 }
                 return web.json_response({
@@ -241,6 +264,20 @@ class TransMcpHttpServer:
             elif method == "tools/call":
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
+                
+                if tool_name in self.HTTP_HIDDEN_TOOLS:
+                    return web.json_response({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {"content": [{"type": "text", "text": _to_json({
+                            "code": "400",
+                            "msg": (
+                                f"{tool_name} 由服务端读取本地路径，HTTP 模式下不可用"
+                                "（已从工具列表中隐藏）。请改用 upload_document 获取预签名链接，"
+                                "并原样执行其返回的 uploadCommand 完成上传。"
+                            ),
+                        })}]}
+                    })
                 
                 if tool_name in tool_handlers:
                     try:
