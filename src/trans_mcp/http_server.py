@@ -17,6 +17,7 @@ from mcp.types import (
     TextContent,
 )
 from .client import TranslationClient
+from .tools import TOOLS, build_tool_handlers
 
 
 class TransMcpHttpServer:
@@ -26,95 +27,7 @@ class TransMcpHttpServer:
         self.host = host
         self.port = port
         self.server = Server("trans-mcp")
-        self._setup_handlers()
     
-    def _setup_handlers(self):
-        """设置处理器"""
-        
-        # 工具定义
-        self.TOOLS = [
-            Tool(
-                name="get_supported_languages",
-                description="获取支持的语言列表",
-                inputSchema={"type": "object", "properties": {}}
-            ),
-            Tool(
-                name="get_model_list",
-                description="获取可用翻译模型列表",
-                inputSchema={"type": "object", "properties": {}}
-            ),
-            Tool(
-                name="upload_file",
-                description="上传本地文件到翻译平台",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "file_path": {"type": "string", "description": "文件路径"}
-                    },
-                    "required": ["file_path"]
-                }
-            ),
-            Tool(
-                name="translate_document",
-                description="提交文档翻译任务",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "file_list": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "fileName": {"type": "string"},
-                                    "fileObjectKey": {"type": "string"}
-                                }
-                            }
-                        },
-                        "source_language": {"type": "string"},
-                        "target_language": {"type": "string"},
-                        "model": {"type": "string"},
-                        "is_ocr": {"type": "integer"}
-                    },
-                    "required": ["file_list", "source_language", "target_language", "model"]
-                }
-            ),
-            Tool(
-                name="get_document_translation_status",
-                description="查询翻译状态",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "order_no": {"type": "string"}
-                    },
-                    "required": ["order_no"]
-                }
-            ),
-            Tool(
-                name="get_document_translation_result",
-                description="获取翻译结果下载链接",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "order_no": {"type": "string"},
-                        "url_type": {"type": "integer"}
-                    },
-                    "required": ["order_no"]
-                }
-            ),
-            Tool(
-                name="wait_for_translation",
-                description="等待翻译完成",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "order_no": {"type": "string"},
-                        "timeout": {"type": "integer"}
-                    },
-                    "required": ["order_no"]
-                }
-            ),
-        ]
-        
     @staticmethod
     def _get_api_key(request):
         """从 Authorization: Bearer <key> 取 API Key"""
@@ -125,30 +38,9 @@ class TransMcpHttpServer:
     
     @staticmethod
     def _build_tool_handlers(client):
-        """按请求创建工具处理器（绑定该请求的 API Key）"""
-        return {
-            "get_supported_languages": lambda args: client.get_language_enum(),
-            "get_model_list": lambda args: client.get_model_list(),
-            "upload_file": lambda args: client.upload_file(args["file_path"]),
-            "translate_document": lambda args: client.batch_submit_translate_task(
-                args["file_list"],
-                args["source_language"],
-                args["target_language"],
-                args.get("model", "Gemini-2.5-Flash"),
-                args.get("is_ocr", 0)
-            ),
-            "get_document_translation_status": lambda args: client.get_translate_file_detail(args["order_no"]),
-            "get_document_translation_result": lambda args: client.get_translate_s3_download_url(
-                args["order_no"],
-                args.get("url_type", 1)
-            ),
-            "wait_for_translation": lambda args: client.wait_for_translation(
-                args["order_no"],
-                args.get("timeout", 300)
-            ),
-        }
+        """复用 tools.py 中的工具处理器定义"""
+        return build_tool_handlers(client)
     
-
     async def handle_sse(self, request):
         """处理 SSE 连接"""
         # 验证 API Key
@@ -214,7 +106,7 @@ class TransMcpHttpServer:
                             "description": t.description,
                             "inputSchema": t.input_schema
                         }
-                        for t in self.TOOLS
+                        for t in TOOLS
                     ]
                 }
                 return web.json_response({
@@ -305,7 +197,7 @@ class TransMcpHttpServer:
                             "description": t.description,
                             "inputSchema": t.input_schema
                         }
-                        for t in self.TOOLS
+                        for t in TOOLS
                     ]
                 }
                 return web.json_response({

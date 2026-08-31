@@ -15,346 +15,346 @@ from mcp.types import (
 from .client import TranslationClient
 
 
-def register_tools(server: Server, client: TranslationClient):
-    """注册所有 MCP 工具"""
-    
-    # 工具定义列表
-    TOOLS = [
-        Tool(
-            name="get_supported_languages",
-            description="获取支持的语言列表。请在调用 translate_document 之前调用此工具，让用户选择源语言和目标语言。",
-            inputSchema={"type": "object", "properties": {}}
-        ),
-        Tool(
-            name="get_model_list",
-            description="获取当前用户可用的翻译模型列表。请在调用 translate_document 之前调用此工具，并让用户选择一个模型。",
-            inputSchema={"type": "object", "properties": {}}
-        ),
-        Tool(
-            name="upload_document",
-            description="批量获取文档上传链接",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_name_list": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "文件名列表，如 ['contract.pdf', 'doc.docx']"
-                    }
+
+# 工具定义（stdio 与 HTTP 两种传输共用）
+TOOLS = [
+    Tool(
+        name="get_supported_languages",
+        description="获取支持的语言列表。请在调用 translate_document 之前调用此工具，让用户选择源语言和目标语言。",
+        inputSchema={"type": "object", "properties": {}}
+    ),
+    Tool(
+        name="get_model_list",
+        description="获取当前用户可用的翻译模型列表。请在调用 translate_document 之前调用此工具，并让用户选择一个模型。",
+        inputSchema={"type": "object", "properties": {}}
+    ),
+    Tool(
+        name="upload_document",
+        description="批量获取文档上传链接",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_name_list": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "文件名列表，如 ['contract.pdf', 'doc.docx']"
+                }
+            },
+            "required": ["file_name_list"]
+        }
+    ),
+    Tool(
+        name="upload_file",
+        description="上传本地文件到翻译平台。这个工具会自动获取预签名URL并上传文件，返回上传结果和objectKey。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "本地文件的完整路径，如 /Users/xxx/document.pdf"
+                }
+            },
+            "required": ["file_path"]
+        }
+    ),
+    Tool(
+        name="translate_document",
+        description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_list": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "fileName": {"type": "string"},
+                            "fileObjectKey": {"type": "string"}
+                        }
+                    },
+                    "description": "文件列表，每个文件包含 fileName 和 fileObjectKey"
                 },
-                "required": ["file_name_list"]
-            }
-        ),
-        Tool(
-            name="upload_file",
-            description="上传本地文件到翻译平台。这个工具会自动获取预签名URL并上传文件，返回上传结果和objectKey。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "本地文件的完整路径，如 /Users/xxx/document.pdf"
-                    }
+                "source_language": {
+                    "type": "string",
+                    "description": "源语言代码，如 'en', 'zh-CN', 'ja', 'AnyLanguage'。如果用户未指定，请让用户从 get_supported_languages 返回的列表中选择。"
                 },
-                "required": ["file_path"]
-            }
-        ),
-        Tool(
-            name="translate_document",
-            description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_list": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "fileName": {"type": "string"},
-                                "fileObjectKey": {"type": "string"}
-                            }
-                        },
-                        "description": "文件列表，每个文件包含 fileName 和 fileObjectKey"
-                    },
-                    "source_language": {
-                        "type": "string",
-                        "description": "源语言代码，如 'en', 'zh-CN', 'ja', 'AnyLanguage'。如果用户未指定，请让用户从 get_supported_languages 返回的列表中选择。"
-                    },
-                    "target_language": {
-                        "type": "string",
-                        "description": "目标语言代码，如 'zh-CN', 'en', 'ja'。这是必填项，如果用户未指定，请让用户从 get_supported_languages 返回的列表中选择。"
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "翻译模型。这是必填项，请先调用 get_model_list 获取当前用户可用的模型列表，然后让用户选择。"
-                    },
-                    "is_ocr": {
-                        "type": "integer",
-                        "description": "是否启用 OCR，0=否，1=是"
-                    }
+                "target_language": {
+                    "type": "string",
+                    "description": "目标语言代码，如 'zh-CN', 'en', 'ja'。这是必填项，如果用户未指定，请让用户从 get_supported_languages 返回的列表中选择。"
                 },
-                "required": ["file_list", "source_language", "target_language", "model"]
-            }
-        ),
-        Tool(
-            name="get_document_translation_status",
-            description="查询文档翻译任务状态",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "翻译任务订单号"
-                    }
+                "model": {
+                    "type": "string",
+                    "description": "翻译模型。这是必填项，请先调用 get_model_list 获取当前用户可用的模型列表，然后让用户选择。"
                 },
-                "required": ["order_no"]
-            }
-        ),
-        Tool(
-            name="get_document_translation_result",
-            description="获取文档翻译结果下载链接",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "翻译任务订单号"
-                    },
-                    "url_type": {
-                        "type": "integer",
-                        "description": "URL 类型，1=主链接，2=备用链接"
-                    }
+                "is_ocr": {
+                    "type": "integer",
+                    "description": "是否启用 OCR，0=否，1=是"
+                }
+            },
+            "required": ["file_list", "source_language", "target_language", "model"]
+        }
+    ),
+    Tool(
+        name="get_document_translation_status",
+        description="查询文档翻译任务状态",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "翻译任务订单号"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
+        name="get_document_translation_result",
+        description="获取文档翻译结果下载链接",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "翻译任务订单号"
                 },
-                "required": ["order_no"]
-            }
-        ),
-        Tool(
-            name="list_document_translations",
-            description="查询文档翻译任务列表",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "page_num": {
-                        "type": "integer",
-                        "description": "页码，默认 1"
-                    },
-                    "page_size": {
-                        "type": "integer",
-                        "description": "每页数量，默认 10"
-                    },
-                    "status": {
-                        "type": "integer",
-                        "description": "任务状态过滤，可选"
-                    }
+                "url_type": {
+                    "type": "integer",
+                    "description": "URL 类型，1=主链接，2=备用链接"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
+        name="list_document_translations",
+        description="查询文档翻译任务列表",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "page_num": {
+                    "type": "integer",
+                    "description": "页码，默认 1"
+                },
+                "page_size": {
+                    "type": "integer",
+                    "description": "每页数量，默认 10"
+                },
+                "status": {
+                    "type": "integer",
+                    "description": "任务状态过滤，可选"
                 }
             }
-        ),
-        Tool(
-            name="get_document_translation_by_batch",
-            description="通过批次号查询翻译任务",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "batch_no": {
-                        "type": "string",
-                        "description": "批次号"
-                    }
+        }
+    ),
+    Tool(
+        name="get_document_translation_by_batch",
+        description="通过批次号查询翻译任务",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "batch_no": {
+                    "type": "string",
+                    "description": "批次号"
+                }
+            },
+            "required": ["batch_no"]
+        }
+    ),
+    Tool(
+        name="upload_video",
+        description="批量获取视频上传链接",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_name_list": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "视频文件名列表"
+                }
+            },
+            "required": ["file_name_list"]
+        }
+    ),
+    Tool(
+        name="translate_video",
+        description="提交视频翻译任务",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "source_language": {
+                    "type": "string",
+                    "description": "源语言代码"
                 },
-                "required": ["batch_no"]
-            }
-        ),
-        Tool(
-            name="upload_video",
-            description="批量获取视频上传链接",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "file_name_list": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "视频文件名列表"
-                    }
+                "target_language": {
+                    "type": "string",
+                    "description": "目标语言代码"
                 },
-                "required": ["file_name_list"]
-            }
-        ),
-        Tool(
-            name="translate_video",
-            description="提交视频翻译任务",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "source_language": {
-                        "type": "string",
-                        "description": "源语言代码"
-                    },
-                    "target_language": {
-                        "type": "string",
-                        "description": "目标语言代码"
-                    },
-                    "source_file_object_key": {
-                        "type": "string",
-                        "description": "视频文件对象 key"
-                    },
-                    "video_file_name": {
-                        "type": "string",
-                        "description": "视频文件名"
-                    },
-                    "voice_role": {
-                        "type": "string",
-                        "description": "语音角色，可选 'clone' 或其他角色"
-                    },
-                    "subtitle_type": {
-                        "type": "integer",
-                        "description": "字幕类型，1=硬字幕"
-                    }
+                "source_file_object_key": {
+                    "type": "string",
+                    "description": "视频文件对象 key"
                 },
-                "required": ["source_language", "target_language", "source_file_object_key", "video_file_name"]
-            }
-        ),
-        Tool(
-            name="calculate_video_translation_quota",
-            description="计算视频翻译配额",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "video_duration": {
-                        "type": "number",
-                        "description": "视频时长（秒）"
-                    },
-                    "voice_role": {
-                        "type": "string",
-                        "description": "语音角色"
-                    },
-                    "subtitle_type": {
-                        "type": "integer",
-                        "description": "字幕类型"
-                    }
+                "video_file_name": {
+                    "type": "string",
+                    "description": "视频文件名"
                 },
-                "required": ["video_duration"]
-            }
-        ),
-        Tool(
-            name="get_video_translation_status",
-            description="查询视频翻译任务状态",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "视频翻译任务订单号"
-                    }
+                "voice_role": {
+                    "type": "string",
+                    "description": "语音角色，可选 'clone' 或其他角色"
                 },
-                "required": ["order_no"]
-            }
-        ),
-        Tool(
-            name="list_video_translations",
-            description="查询视频翻译任务列表",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "page_num": {
-                        "type": "integer",
-                        "description": "页码"
-                    },
-                    "page_size": {
-                        "type": "integer",
-                        "description": "每页数量"
-                    },
-                    "status": {
-                        "type": "integer",
-                        "description": "状态过滤"
-                    }
+                "subtitle_type": {
+                    "type": "integer",
+                    "description": "字幕类型，1=硬字幕"
+                }
+            },
+            "required": ["source_language", "target_language", "source_file_object_key", "video_file_name"]
+        }
+    ),
+    Tool(
+        name="calculate_video_translation_quota",
+        description="计算视频翻译配额",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "video_duration": {
+                    "type": "number",
+                    "description": "视频时长（秒）"
+                },
+                "voice_role": {
+                    "type": "string",
+                    "description": "语音角色"
+                },
+                "subtitle_type": {
+                    "type": "integer",
+                    "description": "字幕类型"
+                }
+            },
+            "required": ["video_duration"]
+        }
+    ),
+    Tool(
+        name="get_video_translation_status",
+        description="查询视频翻译任务状态",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "视频翻译任务订单号"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
+        name="list_video_translations",
+        description="查询视频翻译任务列表",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "page_num": {
+                    "type": "integer",
+                    "description": "页码"
+                },
+                "page_size": {
+                    "type": "integer",
+                    "description": "每页数量"
+                },
+                "status": {
+                    "type": "integer",
+                    "description": "状态过滤"
                 }
             }
-        ),
-        Tool(
-            name="cancel_video_translation",
-            description="取消视频翻译任务",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "视频翻译任务订单号"
-                    }
+        }
+    ),
+    Tool(
+        name="cancel_video_translation",
+        description="取消视频翻译任务",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "视频翻译任务订单号"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
+        name="wait_for_translation",
+        description="等待翻译任务完成。自动轮询翻译状态，直到翻译完成或超时。返回翻译结果信息。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "翻译任务订单号"
                 },
-                "required": ["order_no"]
-            }
-        ),
-        Tool(
-            name="wait_for_translation",
-            description="等待翻译任务完成。自动轮询翻译状态，直到翻译完成或超时。返回翻译结果信息。",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "翻译任务订单号"
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "超时时间（秒），默认 300 秒（5分钟）"
-                    }
+                "timeout": {
+                    "type": "integer",
+                    "description": "超时时间（秒），默认 300 秒（5分钟）"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
+        name="get_video_subtitles",
+        description="获取视频字幕",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "视频翻译任务订单号"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
+        name="rewrite_video_subtitles",
+        description="提交视频字幕改写任务",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "视频翻译任务订单号"
                 },
-                "required": ["order_no"]
-            }
-        ),
-        Tool(
-            name="get_video_subtitles",
-            description="获取视频字幕",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "视频翻译任务订单号"
-                    }
+                "source_subtitles_txt": {
+                    "type": "string",
+                    "description": "源语言字幕文本"
                 },
-                "required": ["order_no"]
-            }
-        ),
-        Tool(
-            name="rewrite_video_subtitles",
-            description="提交视频字幕改写任务",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "视频翻译任务订单号"
-                    },
-                    "source_subtitles_txt": {
-                        "type": "string",
-                        "description": "源语言字幕文本"
-                    },
-                    "target_subtitles_txt": {
-                        "type": "string",
-                        "description": "目标语言字幕文本"
-                    }
-                },
-                "required": ["order_no", "source_subtitles_txt", "target_subtitles_txt"]
-            }
-        ),
-        Tool(
-            name="get_video_rewrite_status",
-            description="查询视频字幕改写状态",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "order_no": {
-                        "type": "string",
-                        "description": "改写任务订单号"
-                    }
-                },
-                "required": ["order_no"]
-            }
-        ),
-    ]
-    
-    # 工具处理器映射
-    TOOL_HANDLERS = {
+                "target_subtitles_txt": {
+                    "type": "string",
+                    "description": "目标语言字幕文本"
+                }
+            },
+            "required": ["order_no", "source_subtitles_txt", "target_subtitles_txt"]
+        }
+    ),
+    Tool(
+        name="get_video_rewrite_status",
+        description="查询视频字幕改写状态",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "改写任务订单号"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+]
+
+
+def build_tool_handlers(client: TranslationClient):
+    """按传入的 client 构建工具处理器映射"""
+    return {
         "get_supported_languages": lambda args: client.get_language_enum(),
         "get_model_list": lambda args: client.get_model_list(),
         "upload_document": lambda args: client.doc_batch_presigned_upload_url(args["file_name_list"]),
@@ -409,6 +409,11 @@ def register_tools(server: Server, client: TranslationClient):
         "get_video_rewrite_status": lambda args: client.get_video_rewrite_detail(args["order_no"]),
         "wait_for_translation": lambda args: client.wait_for_translation(args["order_no"], args.get("timeout", 300)),
     }
+
+
+def register_tools(server: Server, client: TranslationClient):
+    """注册所有 MCP 工具（stdio 模式）"""
+    TOOL_HANDLERS = build_tool_handlers(client)
     
     # 注册工具列表处理器
     async def handle_list_tools(ctx, params: PaginatedRequestParams) -> ListToolsResult:
