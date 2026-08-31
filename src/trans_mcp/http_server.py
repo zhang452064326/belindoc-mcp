@@ -22,13 +22,10 @@ from .client import TranslationClient
 class TransMcpHttpServer:
     """HTTP 模式的 MCP Server"""
     
-    def __init__(self, api_key: str, host: str = "0.0.0.0", port: int = 8080, token: str = None):
-        self.api_key = api_key
+    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
         self.host = host
         self.port = port
-        self.token = token  # 访问令牌
         self.server = Server("trans-mcp")
-        self.client = TranslationClient(api_key)
         self._setup_handlers()
     
     def _setup_handlers(self):
@@ -221,9 +218,9 @@ class TransMcpHttpServer:
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
                 
-                if tool_name in self.TOOL_HANDLERS:
+                if tool_name in tool_handlers:
                     try:
-                        result = await self.TOOL_HANDLERS[tool_name](arguments)
+                        result = await tool_handlers[tool_name](arguments)
                         return web.json_response({
                             "jsonrpc": "2.0",
                             "id": msg_id,
@@ -264,11 +261,40 @@ class TransMcpHttpServer:
     
     async def handle_mcp(self, request):
         """处理 MCP 请求（Streamable HTTP）"""
-        # 验证 API Key
-        if self.token:
-            api_key = request.headers.get('X-Api-Key', '')
-            if api_key != self.token:
-                return web.Response(status=401, text='Unauthorized: Invalid API Key')
+        # 从请求头获取 API Key
+        api_key = request.headers.get('X-Api-Key')
+        if not api_key:
+            return web.json_response({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32000, "message": "Missing X-Api-Key header"}
+            }, status=401)
+        
+        # 创建翻译客户端
+        client = TranslationClient(api_key)
+        
+        # 动态创建工具处理器
+        tool_handlers = {
+            "get_supported_languages": lambda args: client.get_language_enum(),
+            "get_model_list": lambda args: client.get_model_list(),
+            "upload_file": lambda args: client.upload_file(args["file_path"]),
+            "translate_document": lambda args: client.batch_submit_translate_task(
+                args["file_list"],
+                args["source_language"],
+                args["target_language"],
+                args.get("model", "Gemini-2.5-Flash"),
+                args.get("is_ocr", 0)
+            ),
+            "get_document_translation_status": lambda args: client.get_translate_file_detail(args["order_no"]),
+            "get_document_translation_result": lambda args: client.get_translate_s3_download_url(
+                args["order_no"],
+                args.get("url_type", 1)
+            ),
+            "wait_for_translation": lambda args: client.wait_for_translation(
+                args["order_no"],
+                args.get("timeout", 300)
+            ),
+        }
         
         try:
             body = await request.json()
@@ -363,17 +389,10 @@ class TransMcpHttpServer:
 
 def main():
     """启动 HTTP MCP Server"""
-    api_key = os.environ.get("BELINDOC_API_KEY")
-    if not api_key:
-        print("错误: 请设置 BELINDOC_API_KEY 环境变量", file=sys.stderr)
-        sys.exit(1)
-    
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8080"))
-    # 使用 API Key 作为访问令牌
-    token = api_key
     
-    server = TransMcpHttpServer(api_key, host, port, token)
+    server = TransMcpHttpServer(host, port)
     server.run()
 
 

@@ -9,7 +9,6 @@ COPY src/ src/
 RUN pip install --no-cache-dir -e ".[http]"
 
 # 环境变量
-ENV BELINDOC_API_KEY=""
 ENV MCP_HOST=0.0.0.0
 ENV MCP_PORT=8080
 

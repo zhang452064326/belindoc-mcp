@@ -36,15 +36,11 @@ if [ ! -f .env ]; then
     
     cat > .env << EOF
 # Trans MCP Server 配置
-# 请替换为你的 API Key
-BELINDOC_API_KEY=your_api_key_here
 MCP_HOST=0.0.0.0
 MCP_PORT=8080
 EOF
     
-    echo -e "${YELLOW}请编辑 .env 文件，填入你的 API Key${NC}"
-    echo "vi .env"
-    exit 1
+    echo -e "${GREEN}配置完成${NC}"
 fi
 
 # 5. 构建并启动

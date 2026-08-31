@@ -6,7 +6,6 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - BELINDOC_API_KEY=${BELINDOC_API_KEY}
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8080
     restart: unless-stopped
