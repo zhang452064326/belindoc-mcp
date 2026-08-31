@@ -127,7 +127,7 @@ TOOLS = [
     ),
     Tool(
         name="get_document_translation_result",
-        description="获取文档翻译结果下载链接。url_type 决定拿到哪个版本：1=原文、2=纯译文（默认）、3=双语对照、4=双语对照另一版式。要译文不要传 1。",
+        description="获取文档翻译结果下载链接。url_type 决定版式：1=原文、2=纯译文（默认）、3=横向对照（左右并排）、4=纵向对照（原文页与译文页交替）。要译文不要传 1。返回的 url 走 CloudFront，url2 为国内兜底线路。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -137,7 +137,7 @@ TOOLS = [
                 },
                 "url_type": {
                     "type": "integer",
-                    "description": "1=原文, 2=纯译文(默认), 3=双语对照, 4=双语对照另一版式"
+                    "description": "1=原文, 2=纯译文(默认), 3=横向对照(左右并排), 4=纵向对照(原文页与译文页交替)"
                 }
             },
             "required": ["order_no"]
@@ -300,7 +300,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。返回 finished=true 时附带 downloadUrl（纯译文）与 bilingualUrl（双语对照）；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
+        description="等待翻译任务完成。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路）；其他版式用 get_document_translation_result 取；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
         inputSchema={
             "type": "object",
             "properties": {

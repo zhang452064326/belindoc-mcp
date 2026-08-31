@@ -11,6 +11,13 @@ API_BASE_URL = "http://internal-test-host:6101"
 DOC_PREFIX = "/external/translate"
 # 上游瞬时错误码：600 = System is busy
 TRANSIENT_CODES = {"600"}
+# 下载版式：实测确认，1/2 为纵向单语，3 为左右并排，4 为原文页与译文页交替
+URL_TYPE_LABELS = {
+    1: "原文",
+    2: "纯译文",
+    3: "横向对照（左右并排，A3 横向）",
+    4: "纵向对照（原文页与译文页交替，页数翻倍）",
+}
 VIDEO_PREFIX = "/external/videoTranslate"
 
 
@@ -236,10 +243,6 @@ class TranslationClient:
                 if task_status == 3:
                     # 翻译完成，取译文链接（url_type=2）；1 是原文，不要用
                     download_result = await self.get_translate_s3_download_url(order_no, 2)
-                    try:
-                        bilingual = await self.get_translate_s3_download_url(order_no, 3)
-                    except Exception:
-                        bilingual = {}
                     
                     return {
                         "code": "200",
@@ -254,11 +257,12 @@ class TranslationClient:
                             "textNumber": data.get("textNumber"),
                             "elapsed": int(elapsed),
                             "downloadUrl": download_result.get("url"),
-                            "downloadUrl2": download_result.get("url2"),
-                            "bilingualUrl": bilingual.get("url"),
+                            "downloadUrlCN": download_result.get("url2"),
                             "downloadNote": (
-                                "downloadUrl 为纯译文，bilingualUrl 为双语对照。"
-                                "需要原文用 get_document_translation_result 传 url_type=1。"
+                                "以上为纯译文。downloadUrl 走 CloudFront，"
+                                "downloadUrlCN 为国内兜底线路，前者慢或不通时改用后者。"
+                                "需要其他版式请调 get_document_translation_result："
+                                "url_type=1 原文、3 横向对照（左右并排）、4 纵向对照（原文译文页交替）。"
                             ),
                         }
                     }
@@ -407,8 +411,10 @@ class TranslationClient:
     ) -> dict:
         """获取翻译文件下载地址
 
-        url_type: 1=原文, 2=纯译文, 3=双语对照, 4=双语对照(另一版式)。
+        url_type: 1=原文, 2=纯译文, 3=横向对照, 4=纵向对照。
         默认 2——调用方要的通常是译文，取 1 会拿到原文。
+
+        返回的 url 走 CloudFront，url2 走 download.belindoc.com（国内兜底线路）。
         """
         response = await self.client.post(
             f"{DOC_PREFIX}/getTranslateS3DownloadUrl",
@@ -431,7 +437,13 @@ class TranslationClient:
                     except:
                         pass
         
-        return result if result else {"error": "未获取到下载链接", "raw": content}
+        if not result:
+            return {"error": "未获取到下载链接", "raw": content}
+        
+        result["urlType"] = url_type
+        result["variant"] = URL_TYPE_LABELS.get(url_type, f"未知版式({url_type})")
+        result["lineNote"] = "url 走 CloudFront；url2 为国内兜底线路，海外线路不通时改用它。"
+        return result
     
     # ============ 图片翻译 ============
     
