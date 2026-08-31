@@ -25,9 +25,11 @@ async def test_get_language_enum(client):
     }
     mock_response.raise_for_status = MagicMock()
     
-    client.client.get = AsyncMock(return_value=mock_response)
+    # get_language_enum 走的是 POST，不是 GET
+    client.client.post = AsyncMock(return_value=mock_response)
     
     result = await client.get_language_enum()
+    client.client.post.assert_awaited_once()
     assert result["code"] == 0
     assert "en" in result["data"]
 
@@ -45,4 +47,5 @@ async def test_get_quota(client):
     client.client.get = AsyncMock(return_value=mock_response)
     
     result = await client.get_quota()
+    client.client.get.assert_awaited_once()
     assert result["code"] == 0
