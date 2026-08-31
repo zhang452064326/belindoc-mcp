@@ -11,14 +11,31 @@ API_BASE_URL = "http://internal-test-host:6101"
 DOC_PREFIX = "/external/translate"
 # 上游瞬时错误码：600 = System is busy
 TRANSIENT_CODES = {"600"}
-# 下载版式：实测确认，1/2 为纵向单语，3 为左右并排，4 为原文页与译文页交替
+# 下载版式。实测各文件类型的支持情况：
+#   PDF   1 2 3 4        EPUB  1 2 4（流式排版无法左右并排）
+#   DOCX  1 2
+# 上游对不支持的组合只回一句 "Failed to generate file."，这里补上可读的解释。
 URL_TYPE_LABELS = {
     1: "原文",
     2: "纯译文",
-    3: "横向对照（左右并排，A3 横向）",
-    4: "纵向对照（原文页与译文页交替，页数翻倍）",
+    3: "横向对照（左右并排）",
+    4: "纵向对照（原文与译文上下排列）",
+}
+URL_TYPE_SUPPORT = {
+    3: "仅 PDF",
+    4: "仅 PDF 与 EPUB",
 }
 VIDEO_PREFIX = "/external/videoTranslate"
+
+
+def _variant_hint(file_type: str | None) -> str:
+    """按文件类型说明可用的版式，避免调用方去试注定失败的取值"""
+    ft = (file_type or "").upper()
+    if ft == "PDF":
+        return "url_type=1 原文、3 横向对照（左右并排）、4 纵向对照（原文与译文上下排列）。"
+    if ft == "EPUB":
+        return "url_type=1 原文、4 纵向对照（原文与译文上下排列）；本类型不支持横向对照。"
+    return f"url_type=1 原文；{ft or '该类型'} 不支持对照版式（横向仅 PDF，纵向仅 PDF 与 EPUB）。"
 
 
 def _attach_upload_command(result: dict) -> None:
@@ -261,8 +278,8 @@ class TranslationClient:
                             "downloadNote": (
                                 "以上为纯译文。downloadUrl 走 CloudFront，"
                                 "downloadUrlCN 为国内兜底线路，前者慢或不通时改用后者。"
-                                "需要其他版式请调 get_document_translation_result："
-                                "url_type=1 原文、3 横向对照（左右并排）、4 纵向对照（原文译文页交替）。"
+                                "其他版式用 get_document_translation_result 取："
+                                + _variant_hint(data.get("fileType"))
                             ),
                         }
                     }
@@ -442,6 +459,18 @@ class TranslationClient:
         
         result["urlType"] = url_type
         result["variant"] = URL_TYPE_LABELS.get(url_type, f"未知版式({url_type})")
+        
+        if not result.get("url"):
+            # 该文件类型不支持这个版式时，上游只回 "Failed to generate file."
+            support = URL_TYPE_SUPPORT.get(url_type)
+            result["code"] = "400"
+            result["msg"] = (
+                f"该文件不支持「{result['variant']}」版式"
+                + (f"（{support} 支持）。" if support else "。")
+                + "请改用 url_type=2 取纯译文，或 url_type=1 取原文。"
+            )
+            return result
+        
         result["lineNote"] = "url 走 CloudFront；url2 为国内兜底线路，海外线路不通时改用它。"
         return result
     

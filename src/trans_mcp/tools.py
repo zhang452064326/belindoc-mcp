@@ -127,7 +127,7 @@ TOOLS = [
     ),
     Tool(
         name="get_document_translation_result",
-        description="获取文档翻译结果下载链接。url_type 决定版式：1=原文、2=纯译文（默认）、3=横向对照（左右并排）、4=纵向对照（原文页与译文页交替）。要译文不要传 1。返回的 url 走 CloudFront，url2 为国内兜底线路。",
+        description="获取文档翻译结果下载链接。url_type 决定版式：1=原文、2=纯译文（默认）、3=横向对照（左右并排，仅 PDF）、4=纵向对照（原文与译文上下排列，仅 PDF 与 EPUB）。要译文不要传 1。返回的 url 走 CloudFront，url2 为国内兜底线路。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -137,7 +137,7 @@ TOOLS = [
                 },
                 "url_type": {
                     "type": "integer",
-                    "description": "1=原文, 2=纯译文(默认), 3=横向对照(左右并排), 4=纵向对照(原文页与译文页交替)"
+                    "description": "1=原文, 2=纯译文(默认), 3=横向对照/左右并排(仅 PDF), 4=纵向对照/上下排列(仅 PDF 与 EPUB)"
                 }
             },
             "required": ["order_no"]
