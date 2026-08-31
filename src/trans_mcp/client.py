@@ -71,20 +71,7 @@ class TranslationClient:
             json={"fileNameList": file_name_list}
         )
         response.raise_for_status()
-        result = response.json()
-        
-        # 在返回结果中添加上传说明
-        if result.get("code") == "200":
-            for item in result.get("data", []):
-                item["uploadInstructions"] = (
-                    f"请使用以下 Python 代码上传文件：\n"
-                    f"import httpx\n"
-                    f"with open('文件路径', 'rb') as f:\n"
-                    f"    httpx.put('{item['persignedUploadUrl'][:50]}...', content=f.read(), "
-                    f"headers={{'Content-Disposition': f\"attachment; filename*=UTF-8''{item['encodeFileName']}\"}})"
-                )
-        
-        return result
+        return response.json()
     
     async def upload_file(self, file_path: str) -> dict:
         """上传本地文件到翻译平台"""
@@ -138,21 +125,34 @@ class TranslationClient:
                 "error": upload_response.text[:200]
             }
     
-    async def wait_for_translation(self, order_no: str, timeout: int = 300) -> dict:
-        """等待翻译任务完成，自动轮询状态"""
+    async def wait_for_translation(self, order_no: str, timeout: int = 120) -> dict:
+        """等待翻译任务完成，自动轮询状态
+
+        超时不算失败：返回当前进度与排队信息，由调用方决定是否继续等待。
+        """
         import asyncio
         
         start_time = asyncio.get_event_loop().time()
         last_progress = -1
+        interval = 2  # 轮询间隔，逐步放宽到 15 秒，避免高频打上游
+        snapshot = {}
         
         while True:
             # 检查超时
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed > timeout:
                 return {
-                    "code": "408",
-                    "msg": f"等待超时（已等待 {timeout} 秒）",
-                    "data": {"orderNo": order_no, "elapsed": int(elapsed)}
+                    "code": "202",
+                    "msg": (
+                        f"仍在处理中（已等待 {int(elapsed)} 秒）。"
+                        f"任务未失败，可再次调用 wait_for_translation 继续等待。"
+                    ),
+                    "data": {
+                        "orderNo": order_no,
+                        "elapsed": int(elapsed),
+                        "finished": False,
+                        **snapshot,
+                    }
                 }
             
             # 查询翻译状态
@@ -176,6 +176,7 @@ class TranslationClient:
                         "msg": "翻译完成",
                         "data": {
                             "orderNo": order_no,
+                            "finished": True,
                             "fileName": data["sourceFileName"],
                             "sourceLanguage": data["sourceLanguage"],
                             "targetLanguage": data["targetLanguage"],
@@ -187,10 +188,19 @@ class TranslationClient:
                         }
                     }
                 elif task_status in [0, 2]:
-                    # 排队或翻译中，打印进度
+                    # 排队或翻译中，记录快照供超时返回时带出
+                    status_text = "排队中" if task_status == 0 else "翻译中"
+                    snapshot = {
+                        "statusText": status_text,
+                        "progress": f"{progress:.1f}%",
+                        "fileName": data.get("sourceFileName"),
+                    }
+                    if progress_info:
+                        snapshot["queueRank"] = progress_info.get("taskRanking")
+                        snapshot["queueTotal"] = progress_info.get("totalTask")
+                        snapshot["predictWaitSeconds"] = progress_info.get("predictWaitTime")
                     if int(progress) != int(last_progress):
                         last_progress = progress
-                        status_text = "排队中" if task_status == 0 else "翻译中"
                         print(f"[{status_text}] 进度: {progress:.1f}% (已等待 {int(elapsed)}秒)", flush=True)
                 else:
                     # 未知状态
@@ -200,13 +210,14 @@ class TranslationClient:
                         "data": data
                     }
                 
-                # 等待 1 秒后再次查询（减少间隔）
-                await asyncio.sleep(1)
+                # 递增退避：2s 起，逐步放宽到 15s 上限
+                await asyncio.sleep(interval)
+                interval = min(interval + 1, 15)
                 
             except Exception as e:
                 # 网络错误，等待后重试
-                print(f"查询出错: {e}，1秒后重试...", flush=True)
-                await asyncio.sleep(1)
+                print(f"查询出错: {e}，{interval}秒后重试...", flush=True)
+                await asyncio.sleep(interval)
     
     async def batch_submit_translate_task(
         self,
@@ -228,7 +239,34 @@ class TranslationClient:
             }
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        
+        # 上游不返回订单号，提交后回查一次，避免调用方去翻列表
+        if result.get("code") == "200":
+            names = {f.get("fileName") for f in file_list}
+            try:
+                recent = await self.search_translate_file_page(1, max(len(file_list), 5))
+                # 记录按新到旧排列，同名文件只取最新的一条
+                orders, seen = [], set()
+                for r in recent.get("data", {}).get("records", []):
+                    name = r.get("sourceFileName")
+                    if name in names and name not in seen:
+                        seen.add(name)
+                        orders.append({
+                            "translateOrderNo": r["translateOrderNo"],
+                            "fileName": name,
+                            "status": r["status"],
+                        })
+                if orders:
+                    result.setdefault("data", {})["orders"] = orders
+                    result["msg"] = (
+                        "任务已提交。请用返回的 orders[].translateOrderNo "
+                        "调用 wait_for_translation 等待完成。"
+                    )
+            except Exception:
+                pass  # 回查失败不影响提交结果
+        
+        return result
     
     async def search_translate_file_by_batch_no(self, batch_no: str) -> dict:
         """通过批次号查询翻译任务"""

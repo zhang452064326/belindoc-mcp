@@ -17,7 +17,7 @@ from mcp.types import (
     TextContent,
 )
 from .client import TranslationClient
-from .tools import TOOLS, build_tool_handlers
+from .tools import TOOLS, build_tool_handlers, _to_json
 
 
 class TransMcpHttpServer:
@@ -126,7 +126,7 @@ class TransMcpHttpServer:
                             "jsonrpc": "2.0",
                             "id": msg_id,
                             "result": {
-                                "content": [{"type": "text", "text": str(result)}]
+                                "content": [{"type": "text", "text": _to_json(result)}]
                             }
                         })
                     except Exception as e:
@@ -249,7 +249,7 @@ class TransMcpHttpServer:
                             "jsonrpc": "2.0",
                             "id": msg_id,
                             "result": {
-                                "content": [{"type": "text", "text": str(result)}]
+                                "content": [{"type": "text", "text": _to_json(result)}]
                             }
                         })
                     except Exception as e:

@@ -16,6 +16,15 @@ from .client import TranslationClient
 
 
 
+def _to_json(result) -> str:
+    """工具结果统一序列化为 JSON（中文不转义），避免输出 Python repr"""
+    import json
+    try:
+        return json.dumps(result, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(result)
+
+
 # 工具定义（stdio 与 HTTP 两种传输共用）
 TOOLS = [
     Tool(
@@ -30,7 +39,7 @@ TOOLS = [
     ),
     Tool(
         name="upload_document",
-        description="批量获取文档上传链接",
+        description="【高级】仅获取预签名上传链接，不上传。上传本地文件请直接用 upload_file，不要自己写脚本 PUT。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -45,7 +54,7 @@ TOOLS = [
     ),
     Tool(
         name="upload_file",
-        description="上传本地文件到翻译平台。这个工具会自动获取预签名URL并上传文件，返回上传结果和objectKey。",
+        description="上传本地文件到翻译平台。传入本地路径即可，服务端自动完成预签名与上传，返回 objectKey。这是上传文件的唯一推荐方式，不要自行编写上传脚本。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -59,7 +68,7 @@ TOOLS = [
     ),
     Tool(
         name="translate_document",
-        description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。",
+        description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。返回中的 orders[].translateOrderNo 即订单号，直接用它调 wait_for_translation，无需再查列表。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -283,7 +292,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。自动轮询翻译状态，直到翻译完成或超时。返回翻译结果信息。",
+        description="等待翻译任务完成。返回 finished=true 时附带下载链接；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -293,7 +302,7 @@ TOOLS = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "超时时间（秒），默认 300 秒（5分钟）"
+                    "description": "本次最多等待的秒数，默认 120。到点未完成会返回当前进度而非报错，可再次调用继续等待。"
                 }
             },
             "required": ["order_no"]
@@ -432,7 +441,7 @@ def register_tools(server: Server, client: TranslationClient):
         try:
             result = await TOOL_HANDLERS[tool_name](args)
             return CallToolResult(
-                content=[TextContent(type="text", text=str(result))],
+                content=[TextContent(type="text", text=_to_json(result))],
                 isError=False
             )
         except Exception as e:
