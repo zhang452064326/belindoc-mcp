@@ -220,10 +220,12 @@ class TranslationClient:
                 "error": upload_response.text[:200]
             }
     
-    async def wait_for_translation(self, order_no: str, timeout: int = 120) -> dict:
+    async def wait_for_translation(self, order_no: str, timeout: int = 45) -> dict:
         """等待翻译任务完成，自动轮询状态
 
-        超时不算失败：返回当前进度与排队信息，由调用方决定是否继续等待。
+        上游只在轮询时给出进度，无法主动推送。默认等 45 秒就返回一次当前进度，
+        让调用方把进度转述给用户后再继续等，避免长时间静默。
+        超时不算失败。
         """
         import asyncio
         
@@ -239,8 +241,13 @@ class TranslationClient:
                 return {
                     "code": "202",
                     "msg": (
-                        f"仍在处理中（已等待 {int(elapsed)} 秒）。"
-                        f"任务未失败，可再次调用 wait_for_translation 继续等待。"
+                        f"{snapshot.get('statusText', '处理中')}"
+                        f"{' ' + snapshot['progress'] if snapshot.get('progress') else ''}"
+                        f"（已等待 {int(elapsed)} 秒）"
+                        + (f"，排队第 {snapshot['queueRank']}/{snapshot['queueTotal']} 位"
+                           if snapshot.get('queueRank') else "")
+                        + "。任务未失败，请把进度告诉用户，然后再次调用 "
+                          "wait_for_translation 继续等待。"
                     ),
                     "data": {
                         "orderNo": order_no,
@@ -313,7 +320,7 @@ class TranslationClient:
                 
                 # 递增退避：2s 起，逐步放宽到 15s 上限
                 await asyncio.sleep(interval)
-                interval = min(interval + 1, 15)
+                interval = min(interval + 1, 8)
                 
             except Exception as e:
                 # 网络错误，等待后重试

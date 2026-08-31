@@ -300,7 +300,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路）；其他版式用 get_document_translation_result 取；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
+        description="等待翻译任务完成。上游只能轮询、无法推送，因此本工具默认等 45 秒就返回一次当前进度（progress 百分比、排队名次、预计等待秒数）——请把进度转述给用户，再次调用即可继续等待，任务不会中断。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路）；其他版式用 get_document_translation_result 取；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -310,7 +310,7 @@ TOOLS = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "本次最多等待的秒数，默认 120。到点未完成会返回当前进度而非报错，可再次调用继续等待。"
+                    "description": "本次最多等待的秒数，默认 45。到点未完成会返回当前进度而非报错，可再次调用继续等待。文件较大时可调大，但会让用户等更久才看到反馈。"
                 }
             },
             "required": ["order_no"]
