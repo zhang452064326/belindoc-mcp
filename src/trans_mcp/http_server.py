@@ -115,36 +115,45 @@ class TransMcpHttpServer:
             ),
         ]
         
-        # 工具处理器
-        self.TOOL_HANDLERS = {
-            "get_supported_languages": lambda args: self.client.get_language_enum(),
-            "get_model_list": lambda args: self.client.get_model_list(),
-            "upload_file": lambda args: self.client.upload_file(args["file_path"]),
-            "translate_document": lambda args: self.client.batch_submit_translate_task(
+    @staticmethod
+    def _get_api_key(request):
+        """从 Authorization: Bearer <key> 取 API Key"""
+        auth = request.headers.get('Authorization', '')
+        if auth.lower().startswith('bearer '):
+            return auth[7:].strip()
+        return None
+    
+    @staticmethod
+    def _build_tool_handlers(client):
+        """按请求创建工具处理器（绑定该请求的 API Key）"""
+        return {
+            "get_supported_languages": lambda args: client.get_language_enum(),
+            "get_model_list": lambda args: client.get_model_list(),
+            "upload_file": lambda args: client.upload_file(args["file_path"]),
+            "translate_document": lambda args: client.batch_submit_translate_task(
                 args["file_list"],
                 args["source_language"],
                 args["target_language"],
                 args.get("model", "Gemini-2.5-Flash"),
                 args.get("is_ocr", 0)
             ),
-            "get_document_translation_status": lambda args: self.client.get_translate_file_detail(args["order_no"]),
-            "get_document_translation_result": lambda args: self.client.get_translate_s3_download_url(
+            "get_document_translation_status": lambda args: client.get_translate_file_detail(args["order_no"]),
+            "get_document_translation_result": lambda args: client.get_translate_s3_download_url(
                 args["order_no"],
                 args.get("url_type", 1)
             ),
-            "wait_for_translation": lambda args: self.client.wait_for_translation(
+            "wait_for_translation": lambda args: client.wait_for_translation(
                 args["order_no"],
                 args.get("timeout", 300)
             ),
         }
     
+
     async def handle_sse(self, request):
         """处理 SSE 连接"""
         # 验证 API Key
-        if self.token:
-            api_key = request.headers.get('X-Api-Key', '')
-            if api_key != self.token:
-                return web.Response(status=401, text='Unauthorized: Invalid API Key')
+        if not self._get_api_key(request):
+            return web.Response(status=401, text='Unauthorized: 缺少 Authorization: Bearer <key>')
         
         response = web.StreamResponse(
             status=200,
@@ -186,10 +195,10 @@ class TransMcpHttpServer:
     async def handle_message(self, request):
         """处理 JSON-RPC 消息"""
         # 验证 API Key
-        if self.token:
-            api_key = request.headers.get('X-Api-Key', '')
-            if api_key != self.token:
-                return web.Response(status=401, text='Unauthorized: Invalid API Key')
+        if not self._get_api_key(request):
+            return web.Response(status=401, text='Unauthorized: 缺少 Authorization: Bearer <key>')
+        
+        tool_handlers = self._build_tool_handlers(TranslationClient(self._get_api_key(request)))
         
         try:
             body = await request.json()
@@ -261,41 +270,16 @@ class TransMcpHttpServer:
     
     async def handle_mcp(self, request):
         """处理 MCP 请求（Streamable HTTP）"""
-        # 从请求头获取 API Key
-        api_key = request.headers.get('X-Api-Key')
+        api_key = self._get_api_key(request)
         if not api_key:
             return web.json_response({
                 "jsonrpc": "2.0",
                 "id": None,
-                "error": {"code": -32000, "message": "Missing X-Api-Key header"}
+                "error": {"code": -32000, "message": "Missing Authorization: Bearer <key> header"}
             }, status=401)
         
-        # 创建翻译客户端
-        client = TranslationClient(api_key)
-        
-        # 动态创建工具处理器
-        tool_handlers = {
-            "get_supported_languages": lambda args: client.get_language_enum(),
-            "get_model_list": lambda args: client.get_model_list(),
-            "upload_file": lambda args: client.upload_file(args["file_path"]),
-            "translate_document": lambda args: client.batch_submit_translate_task(
-                args["file_list"],
-                args["source_language"],
-                args["target_language"],
-                args.get("model", "Gemini-2.5-Flash"),
-                args.get("is_ocr", 0)
-            ),
-            "get_document_translation_status": lambda args: client.get_translate_file_detail(args["order_no"]),
-            "get_document_translation_result": lambda args: client.get_translate_s3_download_url(
-                args["order_no"],
-                args.get("url_type", 1)
-            ),
-            "wait_for_translation": lambda args: client.wait_for_translation(
-                args["order_no"],
-                args.get("timeout", 300)
-            ),
-        }
-        
+        # 创建翻译客户端（按请求绑定 API Key）
+        tool_handlers = self._build_tool_handlers(TranslationClient(api_key))
         try:
             body = await request.json()
             method = body.get("method")
@@ -330,13 +314,45 @@ class TransMcpHttpServer:
                     "result": result
                 })
             
+            elif method in ("notifications/initialized", "notifications/cancelled"):
+                # 通知消息没有 id，按 JSON-RPC 规范不返回响应体
+                return web.Response(status=202)
+
+            elif method == "resources/list":
+                return web.json_response({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"resources": []}
+                })
+
+            elif method == "resources/templates/list":
+                return web.json_response({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"resourceTemplates": []}
+                })
+
+            elif method == "prompts/list":
+                return web.json_response({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {"prompts": []}
+                })
+
+            elif method == "ping":
+                return web.json_response({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "result": {}
+                })
+
             elif method == "tools/call":
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
                 
-                if tool_name in self.TOOL_HANDLERS:
+                if tool_name in tool_handlers:
                     try:
-                        result = await self.TOOL_HANDLERS[tool_name](arguments)
+                        result = await tool_handlers[tool_name](arguments)
                         return web.json_response({
                             "jsonrpc": "2.0",
                             "id": msg_id,

@@ -7,7 +7,7 @@
 ```
 客户端 A (张三)                 客户端 B (李四)
     ↓                              ↓
-X-Api-Key: ft_kjo...         X-Api-Key: ft_abc...
+Authorization: Bearer ft_kjo...   Authorization: Bearer ft_abc...
     ↓                              ↓
     └──────────┬───────────────────┘
                ↓
@@ -52,7 +52,7 @@ chmod +x deploy.sh
 
 ### 3. 本机配置
 
-部署完成后，在 Codex 配置中添加：
+部署完成后，在客户端配置中添加：
 
 ```json
 {
@@ -61,11 +61,24 @@ chmod +x deploy.sh
       "type": "streamablehttp",
       "url": "http://YOUR_SERVER_IP:8080/mcp",
       "headers": {
-        "X-Api-Key": "你的API密钥"
+        "Authorization": "Bearer 你的API密钥"
       }
     }
   }
 }
+```
+
+### 认证方式
+
+统一使用标准的 `Authorization: Bearer <key>` 请求头。
+
+Codex CLI 的 HTTP MCP 无法发送自定义请求头，只能用 Bearer；
+若走 `~/.codex/config.toml`，写法为：
+
+```toml
+[mcp_servers.belindoc]
+url = "http://YOUR_SERVER_IP:8080/mcp"
+bearer_token_env_var = "BELINDOC_API_KEY"
 ```
 
 ---
@@ -80,7 +93,7 @@ chmod +x deploy.sh
 
 ## 多用户使用
 
-每个人在自己的 Codex 配置中填入自己的 API Key：
+每个人在自己的客户端配置中填入自己的 API Key：
 
 ```json
 // 张三的配置
@@ -89,7 +102,7 @@ chmod +x deploy.sh
     "belindoc": {
       "url": "http://server:8080/mcp",
       "headers": {
-        "X-Api-Key": "ft_kjo..."
+        "Authorization": "Bearer ft_kjo..."
       }
     }
   }
@@ -101,7 +114,7 @@ chmod +x deploy.sh
     "belindoc": {
       "url": "http://server:8080/mcp",
       "headers": {
-        "X-Api-Key": "ft_abc..."
+        "Authorization": "Bearer ft_abc..."
       }
     }
   }
