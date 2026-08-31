@@ -39,7 +39,7 @@ TOOLS = [
     ),
     Tool(
         name="upload_document",
-        description="【高级】仅获取预签名上传链接，不上传。上传本地文件请直接用 upload_file，不要自己写脚本 PUT。",
+        description="【极少使用】仅返回预签名 URL，本工具不会上传任何内容，调用方必须自己把文件 PUT 上去。只有在无法访问本地文件系统时才用它。文件在本机时一律用 upload_file——包括 translate_document 报错后需要重试的情况：那种情况下文件已经传好，直接重试 translate_document 即可，不要重新上传。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -68,7 +68,7 @@ TOOLS = [
     ),
     Tool(
         name="translate_document",
-        description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。返回中的 orders[].translateOrderNo 即订单号，直接用它调 wait_for_translation，无需再查列表。",
+        description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。返回中的 orders[].translateOrderNo 即订单号，直接用它调 wait_for_translation，无需再查列表。若返回非 200（如 600 系统繁忙），说明是翻译服务侧的问题而非上传问题：用相同参数重试本工具即可，不要重新上传文件。",
         inputSchema={
             "type": "object",
             "properties": {

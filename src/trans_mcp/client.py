@@ -9,6 +9,8 @@ API_BASE_URL = "http://internal-test-host:6101"
 # 生产环境（取消注释切换）
 # API_BASE_URL = "https://belindoc.com/api"
 DOC_PREFIX = "/external/translate"
+# 上游瞬时错误码：600 = System is busy
+TRANSIENT_CODES = {"600"}
 VIDEO_PREFIX = "/external/videoTranslate"
 
 
@@ -227,19 +229,41 @@ class TranslationClient:
         model: str = "Gemini-2.5-Flash",
         is_ocr: int = 0,
     ) -> dict:
-        """批量提交文档翻译任务"""
-        response = await self.client.post(
-            f"{DOC_PREFIX}/batchSubmitTranslateTask",
-            json={
-                "fileList": file_list,
-                "sourceLanguage": source_language,
-                "targetLanguage": target_language,
-                "model": model,
-                "isOcr": is_ocr,
-            }
-        )
-        response.raise_for_status()
-        result = response.json()
+        """批量提交文档翻译任务
+
+        上游偶发返回 600（System is busy），属于瞬时故障，内部自动重试，
+        避免调用方误判成上传失败而重新上传文件。
+        """
+        import asyncio
+        
+        payload = {
+            "fileList": file_list,
+            "sourceLanguage": source_language,
+            "targetLanguage": target_language,
+            "model": model,
+            "isOcr": is_ocr,
+        }
+        
+        result = {}
+        for attempt in range(4):
+            response = await self.client.post(
+                f"{DOC_PREFIX}/batchSubmitTranslateTask", json=payload
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("code") not in TRANSIENT_CODES:
+                break
+            if attempt < 3:
+                await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
+        
+        # 重试后仍失败：明确告知文件无需重传，避免调用方回头做上传
+        if result.get("code") in TRANSIENT_CODES:
+            result["msg"] = (
+                f"{result.get('msg')}（已自动重试 4 次）。"
+                "这是翻译服务的瞬时故障，与上传无关：文件已上传成功，"
+                "fileObjectKey 仍然有效，请稍后用相同参数重试 translate_document，"
+                "不要重新上传文件。"
+            )
         
         # 上游不返回订单号，提交后回查一次，避免调用方去翻列表
         if result.get("code") == "200":
