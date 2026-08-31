@@ -1,0 +1,14 @@
+{
+  "name": "@zhangjun/trans-mcp",
+  "version": "0.1.0",
+  "description": "MCP Server for document translation via Belindoc API",
+  "main": "index.js",
+  "bin": {
+    "trans-mcp": "./index.js"
+  },
+  "keywords": ["mcp", "translation", "belindoc"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

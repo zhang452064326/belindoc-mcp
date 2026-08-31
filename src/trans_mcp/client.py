@@ -1,0 +1,459 @@
+"""API 客户端"""
+
+import json
+import httpx
+from typing import Optional
+
+# 测试环境
+API_BASE_URL = "http://internal-test-host:6101"
+# 生产环境（取消注释切换）
+# API_BASE_URL = "https://belindoc.com/api"
+DOC_PREFIX = "/external/translate"
+VIDEO_PREFIX = "/external/videoTranslate"
+
+
+class TranslationClient:
+    """翻译 API 客户端"""
+    
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.client = httpx.AsyncClient(
+            base_url=API_BASE_URL,
+            headers={
+                "X-Api-Key": api_key,
+                "Content-Type": "application/json",
+            },
+            timeout=httpx.Timeout(30.0)  # 30秒超时
+        )
+    
+    async def close(self):
+        await self.client.aclose()
+    
+    # ============ 语言相关 ============
+    
+    async def get_language_enum(self) -> dict:
+        """获取支持的语言列表"""
+        response = await self.client.post(f"{DOC_PREFIX}/getLanguageEnum", json={})
+        response.raise_for_status()
+        return response.json()
+    
+    # ============ 模型相关 ============
+    
+    async def get_model_list(self) -> dict:
+        """获取翻译模型列表，返回当前用户可用的模型名称列表"""
+        response = await self.client.post(f"{DOC_PREFIX}/getModelList", json={})
+        response.raise_for_status()
+        result = response.json()
+        
+        # 只返回可用的模型名称列表
+        if result.get("code") == "200":
+            models = result.get("data", [])
+            # vipType: -1 或 0 表示免费可用，其他需要对应VIP等级
+            available_models = [m["version"] for m in models if m.get("vipType", 0) <= 0]
+            return {"code": "200", "data": available_models, "msg": "请让用户从以下可用模型中选择一个"}
+        return result
+    
+    # ============ 配额相关 ============
+    
+    async def get_quota(self) -> dict:
+        """查询账户配额"""
+        # 注意：此接口可能不存在，需要后端确认
+        response = await self.client.get(f"{DOC_PREFIX}/getQuota")
+        response.raise_for_status()
+        return response.json()
+    
+    # ============ 文档翻译 ============
+    
+    async def doc_batch_presigned_upload_url(self, file_name_list: list[str]) -> dict:
+        """批量获取文档预签名上传 URL"""
+        response = await self.client.post(
+            f"{DOC_PREFIX}/batchPresignedUploadUrl",
+            json={"fileNameList": file_name_list}
+        )
+        response.raise_for_status()
+        result = response.json()
+        
+        # 在返回结果中添加上传说明
+        if result.get("code") == "200":
+            for item in result.get("data", []):
+                item["uploadInstructions"] = (
+                    f"请使用以下 Python 代码上传文件：\n"
+                    f"import httpx\n"
+                    f"with open('文件路径', 'rb') as f:\n"
+                    f"    httpx.put('{item['persignedUploadUrl'][:50]}...', content=f.read(), "
+                    f"headers={{'Content-Disposition': f\"attachment; filename*=UTF-8''{item['encodeFileName']}\"}})"
+                )
+        
+        return result
+    
+    async def upload_file(self, file_path: str) -> dict:
+        """上传本地文件到翻译平台"""
+        import os
+        
+        # 获取文件名
+        file_name = os.path.basename(file_path)
+        
+        # 检查文件是否存在
+        if not os.path.exists(file_path):
+            return {"code": "400", "msg": f"文件不存在: {file_path}"}
+        
+        # 获取预签名URL
+        upload_info = await self.doc_batch_presigned_upload_url([file_name])
+        if upload_info.get("code") != "200":
+            return upload_info
+        
+        upload_data = upload_info["data"][0]
+        presigned_url = upload_data["persignedUploadUrl"]
+        object_key = upload_data["objectKey"]
+        encode_file_name = upload_data["encodeFileName"]
+        
+        # 读取文件并上传
+        with open(file_path, "rb") as f:
+            file_content = f.read()
+        
+        # 使用 httpx 上传（同步）
+        import httpx as sync_httpx
+        upload_response = sync_httpx.put(
+            presigned_url,
+            content=file_content,
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encode_file_name}"
+            }
+        )
+        
+        if upload_response.status_code == 200:
+            return {
+                "code": "200",
+                "msg": "文件上传成功",
+                "data": {
+                    "fileName": file_name,
+                    "objectKey": object_key,
+                    "fileSize": len(file_content)
+                }
+            }
+        else:
+            return {
+                "code": "500",
+                "msg": f"文件上传失败: {upload_response.status_code}",
+                "error": upload_response.text[:200]
+            }
+    
+    async def wait_for_translation(self, order_no: str, timeout: int = 300) -> dict:
+        """等待翻译任务完成，自动轮询状态"""
+        import asyncio
+        
+        start_time = asyncio.get_event_loop().time()
+        last_progress = -1
+        
+        while True:
+            # 检查超时
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                return {
+                    "code": "408",
+                    "msg": f"等待超时（已等待 {timeout} 秒）",
+                    "data": {"orderNo": order_no, "elapsed": int(elapsed)}
+                }
+            
+            # 查询翻译状态
+            try:
+                status = await self.get_translate_file_detail(order_no)
+                if status.get("code") != "200":
+                    return status
+                
+                data = status["data"]
+                task_status = data["status"]
+                progress_info = data.get("taskProgress")
+                progress = float(progress_info["progress"]) if progress_info else 0
+                
+                # 状态: 0=排队, 2=翻译中, 3=完成
+                if task_status == 3:
+                    # 翻译完成，获取下载链接
+                    download_result = await self.get_translate_s3_download_url(order_no, 1)
+                    
+                    return {
+                        "code": "200",
+                        "msg": "翻译完成",
+                        "data": {
+                            "orderNo": order_no,
+                            "fileName": data["sourceFileName"],
+                            "sourceLanguage": data["sourceLanguage"],
+                            "targetLanguage": data["targetLanguage"],
+                            "model": data["model"],
+                            "textNumber": data.get("textNumber"),
+                            "elapsed": int(elapsed),
+                            "downloadUrl": download_result.get("sourceFileUrl") or download_result.get("url"),
+                            "downloadUrl2": download_result.get("sourceFileUrl2") or download_result.get("url2")
+                        }
+                    }
+                elif task_status in [0, 2]:
+                    # 排队或翻译中，打印进度
+                    if int(progress) != int(last_progress):
+                        last_progress = progress
+                        status_text = "排队中" if task_status == 0 else "翻译中"
+                        print(f"[{status_text}] 进度: {progress:.1f}% (已等待 {int(elapsed)}秒)", flush=True)
+                else:
+                    # 未知状态
+                    return {
+                        "code": "500",
+                        "msg": f"未知翻译状态: {task_status}",
+                        "data": data
+                    }
+                
+                # 等待 1 秒后再次查询（减少间隔）
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                # 网络错误，等待后重试
+                print(f"查询出错: {e}，1秒后重试...", flush=True)
+                await asyncio.sleep(1)
+    
+    async def batch_submit_translate_task(
+        self,
+        file_list: list[dict],
+        source_language: str,
+        target_language: str,
+        model: str = "Gemini-2.5-Flash",
+        is_ocr: int = 0,
+    ) -> dict:
+        """批量提交文档翻译任务"""
+        response = await self.client.post(
+            f"{DOC_PREFIX}/batchSubmitTranslateTask",
+            json={
+                "fileList": file_list,
+                "sourceLanguage": source_language,
+                "targetLanguage": target_language,
+                "model": model,
+                "isOcr": is_ocr,
+            }
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def search_translate_file_by_batch_no(self, batch_no: str) -> dict:
+        """通过批次号查询翻译任务"""
+        response = await self.client.post(
+            f"{DOC_PREFIX}/searchTranslateFileByBatchNo",
+            json={"batchNo": batch_no}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def search_translate_file_page(
+        self,
+        page_num: int = 1,
+        page_size: int = 10,
+        status: Optional[int] = None,
+    ) -> dict:
+        """查询翻译任务列表"""
+        payload = {"pageNum": page_num, "pageSize": page_size}
+        if status is not None:
+            payload["status"] = status
+        response = await self.client.post(
+            f"{DOC_PREFIX}/searchTranslateFilePage",
+            json=payload
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_translate_file_detail(self, order_no: str) -> dict:
+        """查询翻译任务详情"""
+        response = await self.client.post(
+            f"{DOC_PREFIX}/getTranslateFileDetail",
+            json={"translateOrderNo": order_no}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_translate_s3_download_url(
+        self,
+        order_no: str,
+        url_type: int = 1,
+    ) -> dict:
+        """获取翻译文件下载地址"""
+        response = await self.client.post(
+            f"{DOC_PREFIX}/getTranslateS3DownloadUrl",
+            json={
+                "translateOrderNo": order_no,
+                "urlType": url_type,
+            }
+        )
+        response.raise_for_status()
+        
+        # 解析 SSE 格式的响应
+        content = response.text
+        result = {}
+        for line in content.split('\n'):
+            if line.startswith('data:') and len(line) > 5:
+                json_str = line[5:].strip()
+                if json_str:
+                    try:
+                        result = json.loads(json_str)
+                    except:
+                        pass
+        
+        return result if result else {"error": "未获取到下载链接", "raw": content}
+    
+    # ============ 图片翻译 ============
+    
+    async def submit_image_translate(
+        self,
+        source_language: str,
+        target_language: str,
+        image_url: str,
+    ) -> dict:
+        """提交图片翻译任务"""
+        response = await self.client.post(
+            f"{DOC_PREFIX}/submitImageTranslate",
+            json={
+                "sourceLanguage": source_language,
+                "targetLanguage": target_language,
+                "imageUrl": image_url,
+            }
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_image_translate_detail(self, order_no: str) -> dict:
+        """查询图片翻译详情"""
+        response = await self.client.get(
+            f"{DOC_PREFIX}/getImageTranslateDetail",
+            params={"orderNo": order_no}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    # ============ 视频翻译 ============
+    
+    async def video_batch_presigned_upload_url(self, file_name_list: list[str]) -> dict:
+        """批量获取视频预签名上传 URL"""
+        response = await self.client.post(
+            f"{VIDEO_PREFIX}/batchPresignedUploadUrl",
+            json={"fileNameList": file_name_list}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def submit_video_translate(
+        self,
+        source_language: str,
+        target_language: str,
+        source_file_object_key: str,
+        video_file_name: str,
+        video_task_param: dict,
+    ) -> dict:
+        """提交视频翻译任务"""
+        response = await self.client.post(
+            f"{VIDEO_PREFIX}/submitVideoTranslate",
+            json={
+                "sourceLanguage": source_language,
+                "targetLanguage": target_language,
+                "sourceFileObjectKey": source_file_object_key,
+                "videoFileName": video_file_name,
+                "videoTaskParam": video_task_param,
+            }
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def video_translate_quota_calculate(
+        self,
+        video_duration: float,
+        voice_role: str,
+        subtitle_type: int,
+    ) -> dict:
+        """计算视频翻译配额"""
+        response = await self.client.post(
+            f"{VIDEO_PREFIX}/videoTranslateQuotaCalculate",
+            json={
+                "videoDuration": video_duration,
+                "voiceRole": voice_role,
+                "subtitleType": subtitle_type,
+            }
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def search_video_translate_page(
+        self,
+        page_num: int = 1,
+        page_size: int = 10,
+        status: Optional[int] = None,
+    ) -> dict:
+        """查询视频翻译任务列表"""
+        params = {"pageNum": page_num, "pageSize": page_size}
+        if status is not None:
+            params["status"] = status
+        response = await self.client.get(
+            f"{VIDEO_PREFIX}/searchVideoTranslatePage",
+            params=params
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_video_translate_detail(self, order_no: str) -> dict:
+        """查询视频翻译详情"""
+        response = await self.client.get(
+            f"{VIDEO_PREFIX}/getVideoTranslateDetail",
+            params={"videoTranslateOrderNo": order_no}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def cancel_video_translate(self, order_no: str) -> dict:
+        """取消视频翻译任务"""
+        response = await self.client.post(
+            f"{VIDEO_PREFIX}/cancelVideoTranslateHistory",
+            json={"videoTranslateOrderNo": order_no}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_video_subtitles(self, order_no: str) -> dict:
+        """获取视频字幕"""
+        response = await self.client.get(
+            f"{VIDEO_PREFIX}/getVideoTranslateSubtitles",
+            params={"videoTranslateOrderNo": order_no}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def submit_video_rewrite(
+        self,
+        order_no: str,
+        source_subtitles_txt: str,
+        target_subtitles_txt: str,
+        video_task_param: Optional[dict] = None,
+    ) -> dict:
+        """提交视频字幕改写任务"""
+        payload = {
+            "videoTranslateOrderNo": order_no,
+            "sourceSubtitlesTxt": source_subtitles_txt,
+            "targetSubtitlesTxt": target_subtitles_txt,
+        }
+        if video_task_param:
+            payload["videoTaskParam"] = video_task_param
+        response = await self.client.post(
+            f"{VIDEO_PREFIX}/submitVideoRewrite",
+            json=payload
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def get_video_rewrite_detail(self, order_no: str) -> dict:
+        """查询视频字幕改写详情"""
+        response = await self.client.get(
+            f"{VIDEO_PREFIX}/getVideoTranslateRewriteDetail",
+            params={"videoTranslateRewriteOrderNo": order_no}
+        )
+        response.raise_for_status()
+        return response.json()
+    
+    async def video_rewrite_quota_calculate(self, order_no: str) -> dict:
+        """计算视频字幕改写配额"""
+        response = await self.client.get(
+            f"{VIDEO_PREFIX}/videoTranslateRewriteQuotaCalculate",
+            params={"videoTranslateRewriteOrderNo": order_no}
+        )
+        response.raise_for_status()
+        return response.json()

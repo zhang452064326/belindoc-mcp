@@ -1,0 +1,73 @@
+#!/bin/bash
+# Trans MCP Server - 一键部署脚本
+# 用法: ./deploy.sh [端口号]
+
+set -e
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+PORT=${1:-8080}
+INSTALL_DIR="/opt/trans-mcp"
+
+echo -e "${GREEN}=== Trans MCP Server 部署 ===${NC}"
+
+# 1. 安装 Docker（如果没有）
+if ! command -v docker &> /dev/null; then
+    echo "安装 Docker..."
+    curl -fsSL https://get.docker.com | sh
+fi
+
+# 2. 创建安装目录
+echo "创建安装目录..."
+sudo mkdir -p $INSTALL_DIR
+cd $INSTALL_DIR
+
+# 3. 解压部署包（如果存在）
+if [ -f /tmp/trans-mcp-deploy.tar.gz ]; then
+    echo "解压部署包..."
+    sudo tar xzf /tmp/trans-mcp-deploy.tar.gz -C $INSTALL_DIR
+fi
+
+# 4. 配置环境变量
+if [ ! -f .env ]; then
+    echo "创建配置文件..."
+    
+    cat > .env << EOF
+# Trans MCP Server 配置
+# 请替换为你的 API Key
+BELINDOC_API_KEY=your_api_key_here
+MCP_HOST=0.0.0.0
+MCP_PORT=8080
+EOF
+    
+    echo -e "${YELLOW}请编辑 .env 文件，填入你的 API Key${NC}"
+    echo "vi .env"
+    exit 1
+fi
+
+# 5. 构建并启动
+echo "构建 Docker 镜像..."
+docker build -t trans-mcp .
+
+echo "启动服务..."
+docker-compose up -d
+
+# 6. 检查状态
+sleep 3
+echo -e "${GREEN}=== 部署完成 ===${NC}"
+echo ""
+echo "服务状态:"
+docker-compose ps
+echo ""
+echo "访问地址: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):$PORT"
+echo ""
+echo -e "${YELLOW}本机配置:${NC}"
+echo '{
+  "mcpServers": {
+    "trans-mcp": {
+      "url": "http://'$SERVER_IP':'$PORT'/sse"
+    }
+  }
+}'
