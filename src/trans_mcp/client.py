@@ -52,14 +52,19 @@ def _attach_upload_command(result: dict) -> None:
         if not url or not encoded:
             continue
         item["contentDisposition"] = f"attachment; filename*=UTF-8''{encoded}"
+        # --progress-bar: 终端里显示上传进度
+        # -w: S3 成功时返回空 body，没有这行就无从判断结果
         item["uploadCommand"] = (
-            f"curl -X PUT --upload-file '<本机文件的完整路径>' "
+            f"curl -X PUT --progress-bar --upload-file '<本机文件的完整路径>' "
             f"-H \"Content-Disposition: attachment; filename*=UTF-8''{encoded}\" "
-            f"'{url}'"
+            f"'{url}' "
+            f"-w '\\n上传结果 HTTP %{{http_code}} | %{{size_upload}} 字节 | "
+            f"%{{time_total}}s | %{{speed_upload}} B/s\\n'"
         )
         item["uploadNote"] = (
             "请原样执行 uploadCommand，只替换文件路径；"
             "Content-Disposition 一个字符都不能改，否则 S3 会报 SignatureDoesNotMatch。"
+            "输出的「上传结果 HTTP 200」才算成功，S3 成功时 body 为空属正常。"
             "上传成功后用本条的 objectKey 作为 fileObjectKey 调 translate_document。"
         )
 
