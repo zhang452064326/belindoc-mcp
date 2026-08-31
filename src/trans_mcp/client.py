@@ -234,8 +234,12 @@ class TranslationClient:
                 
                 # 状态: 0=排队, 2=翻译中, 3=完成
                 if task_status == 3:
-                    # 翻译完成，获取下载链接
-                    download_result = await self.get_translate_s3_download_url(order_no, 1)
+                    # 翻译完成，取译文链接（url_type=2）；1 是原文，不要用
+                    download_result = await self.get_translate_s3_download_url(order_no, 2)
+                    try:
+                        bilingual = await self.get_translate_s3_download_url(order_no, 3)
+                    except Exception:
+                        bilingual = {}
                     
                     return {
                         "code": "200",
@@ -249,8 +253,13 @@ class TranslationClient:
                             "model": data["model"],
                             "textNumber": data.get("textNumber"),
                             "elapsed": int(elapsed),
-                            "downloadUrl": download_result.get("sourceFileUrl") or download_result.get("url"),
-                            "downloadUrl2": download_result.get("sourceFileUrl2") or download_result.get("url2")
+                            "downloadUrl": download_result.get("url"),
+                            "downloadUrl2": download_result.get("url2"),
+                            "bilingualUrl": bilingual.get("url"),
+                            "downloadNote": (
+                                "downloadUrl 为纯译文，bilingualUrl 为双语对照。"
+                                "需要原文用 get_document_translation_result 传 url_type=1。"
+                            ),
                         }
                     }
                 elif task_status in [0, 2]:
@@ -394,9 +403,13 @@ class TranslationClient:
     async def get_translate_s3_download_url(
         self,
         order_no: str,
-        url_type: int = 1,
+        url_type: int = 2,
     ) -> dict:
-        """获取翻译文件下载地址"""
+        """获取翻译文件下载地址
+
+        url_type: 1=原文, 2=纯译文, 3=双语对照, 4=双语对照(另一版式)。
+        默认 2——调用方要的通常是译文，取 1 会拿到原文。
+        """
         response = await self.client.post(
             f"{DOC_PREFIX}/getTranslateS3DownloadUrl",
             json={

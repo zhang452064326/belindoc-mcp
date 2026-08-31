@@ -127,7 +127,7 @@ TOOLS = [
     ),
     Tool(
         name="get_document_translation_result",
-        description="获取文档翻译结果下载链接",
+        description="获取文档翻译结果下载链接。url_type 决定拿到哪个版本：1=原文、2=纯译文（默认）、3=双语对照、4=双语对照另一版式。要译文不要传 1。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -137,7 +137,7 @@ TOOLS = [
                 },
                 "url_type": {
                     "type": "integer",
-                    "description": "URL 类型，1=主链接，2=备用链接"
+                    "description": "1=原文, 2=纯译文(默认), 3=双语对照, 4=双语对照另一版式"
                 }
             },
             "required": ["order_no"]
@@ -300,7 +300,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。返回 finished=true 时附带下载链接；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
+        description="等待翻译任务完成。返回 finished=true 时附带 downloadUrl（纯译文）与 bilingualUrl（双语对照）；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -386,7 +386,7 @@ def build_tool_handlers(client: TranslationClient):
         "get_document_translation_status": lambda args: client.get_translate_file_detail(args["order_no"]),
         "get_document_translation_result": lambda args: client.get_translate_s3_download_url(
             args["order_no"],
-            args.get("url_type", 1)
+            args.get("url_type", 2)
         ),
         "list_document_translations": lambda args: client.search_translate_file_page(
             args.get("page_num", 1),
