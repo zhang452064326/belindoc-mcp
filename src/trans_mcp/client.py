@@ -54,6 +54,56 @@ URL_TYPE_FIELDS = {
     4: ("yComparisonS3Url", None),
 }
 VIDEO_PREFIX = "/external/videoTranslate"
+# 视频任务状态。和文档翻译完全不是一套：这里 2 是「成功」，而文档翻译里
+# 2 是「翻译中」、3 才是完成。照搬会把成功读成进行中。
+VIDEO_STATUS_TEXT = {
+    0: "未开始",
+    1: "进行中",
+    2: "成功",
+    3: "失败",
+    4: "已取消",
+}
+VIDEO_STATUS_DONE = 2
+VIDEO_STATUS_TERMINAL = (2, 3, 4)
+VIDEO_STEP_TEXT = {1: "语音识别", 2: "字幕翻译", 3: "语音生成"}
+VIDEO_STEP_STATUS_TEXT = {0: "未开始", 1: "进行中", 2: "完成", 3: "失败"}
+VIDEO_SUBTITLE_TYPE = {
+    0: "不嵌入字幕",
+    1: "翻译字幕",
+    2: "原始字幕",
+    3: "翻译+原始字幕",
+}
+# 视频时长按 30 秒一个计费单位向上取整，每单位 4 额度
+VIDEO_QUOTA_UNIT_MS = 30_000
+
+
+def _not_found(path: str) -> dict:
+    """404 的可读说明。上游对未部署的接口直接回 404，httpx 抛的是一句英文
+    HTTPStatusError，调用方会当成网络故障反复重试、或告诉用户「服务器维护中」。"""
+    return {
+        "code": "404",
+        "msg": (
+            f"接口 {path} 在当前服务地址（{API_BASE_URL}）上不存在。"
+            "这不是网络故障，也不是服务器维护，重试没有意义："
+            "该功能在这个环境未部署，或路径已变更。请把这句话告诉用户，"
+            "不要反复重试，也不要改用其他工具凑合。"
+        ),
+    }
+
+
+def _annotate_video_status(record: dict) -> dict:
+    """给视频记录补上状态中文说明，别让调用方拿文档翻译那套状态码去套"""
+    if not isinstance(record, dict):
+        return record
+    if "status" in record:
+        record["statusText"] = VIDEO_STATUS_TEXT.get(record["status"], f"未知({record['status']})")
+    if record.get("step") is not None:
+        record["stepText"] = VIDEO_STEP_TEXT.get(record["step"], f"未知({record['step']})")
+    if record.get("stepStatus") is not None:
+        record["stepStatusText"] = VIDEO_STEP_STATUS_TEXT.get(
+            record["stepStatus"], f"未知({record['stepStatus']})"
+        )
+    return record
 
 
 def _available_variants(data: dict) -> dict:
@@ -433,17 +483,77 @@ class TranslationClient:
         """
         response = await self.client.post(path, json=payload)
         if response.status_code == 404:
-            return {
-                "code": "404",
-                "msg": (
-                    f"接口 {path} 在当前服务地址（{API_BASE_URL}）上不存在。"
-                    "这不是网络故障，也不是服务器维护，重试没有意义："
-                    "该功能在这个环境未部署，或路径已变更。请把这句话告诉用户，"
-                    "不要反复重试，也不要改用其他工具凑合。"
-                ),
-            }
+            return _not_found(path)
         response.raise_for_status()
         return response.json()
+
+    async def _post_sse(self, path: str, payload: dict, timeout: float = 45.0) -> dict:
+        """POST 一个 SSE 接口，拿到第一帧带数据的事件就返回
+
+        上游会一路推到任务终态（可能几分钟），一次状态查询没必要挂在那儿。
+        另外鉴权失败时上游回的是普通 JSON 而不是 SSE（文档 3.5 的告警），
+        两种形态都得认——之前按普通 JSON 解析之所以“看起来能用”，正是因为
+        只跑通了这条错误路径。
+        """
+        try:
+            async with self.client.stream(
+                "POST", path, json=payload,
+                timeout=httpx.Timeout(timeout, connect=30.0),
+            ) as response:
+                # 不要加 Accept: text/event-stream。实测带上它，上游在错误路径
+                # 直接回 HTTP 500 空 body；不带反而能正常拿到 JSON 错误体，
+                # 成功时照样推 SSE。
+                if response.status_code == 404:
+                    return _not_found(path)
+                if "text/event-stream" not in response.headers.get("content-type", ""):
+                    body = await response.aread()
+                    try:
+                        return json.loads(body)
+                    except ValueError:
+                        pass
+                    return {
+                        "code": str(response.status_code),
+                        "msg": (
+                            f"上游返回 HTTP {response.status_code}，响应体既不是 SSE 也不是 JSON"
+                            f"{'（body 为空）' if not body else ''}。"
+                            "可改用 list_video_translations 查这个任务的状态。"
+                        ),
+                        "raw": body[:500].decode("utf-8", "replace"),
+                    }
+
+                event = None
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if line.startswith("event:"):
+                        event = line[6:].strip()
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    chunk = line[5:].strip()
+                    if not chunk:
+                        continue          # [PROCESS] 首帧的 data 是空的
+                    try:
+                        parsed = json.loads(chunk)
+                    except ValueError:
+                        continue
+                    if event == "[ERROR]":
+                        return {"code": "500", "msg": "上游返回 [ERROR] 事件",
+                                "sseEvent": event, "data": parsed}
+                    # 已经是标准信封就原样返回，否则包一层
+                    if isinstance(parsed, dict) and "code" in parsed:
+                        parsed.setdefault("sseEvent", event)
+                        return parsed
+                    return {"code": "200", "sseEvent": event, "data": parsed}
+        except httpx.TimeoutException:
+            return {
+                "code": "504",
+                "msg": (
+                    f"{timeout:.0f} 秒内没有收到 SSE 数据帧。任务可能仍在进行，"
+                    "可改用 list_video_translations 轮询查看状态。"
+                ),
+            }
+        return {"code": "500", "msg": "SSE 流已结束但没有取到任何数据帧"}
+
 
     # ============ 语言相关 ============
     
@@ -1110,8 +1220,14 @@ class TranslationClient:
         voice_role: str,
         subtitle_type: int,
     ) -> dict:
-        """计算视频翻译配额"""
-        return await self._post(
+        """计算视频翻译配额
+
+        video_duration 的单位是**毫秒**（文档 3.2）。传成秒会让试算结果低到
+        离谱——按 30 秒一个计费单位向上取整，60 秒的视频传成 60 会被当作
+        0.06 秒，照样只算一个单位，看不出错；但 10 分钟传成 600 就会从 80
+        额度变成 4 额度。
+        """
+        result = await self._post(
             f"{VIDEO_PREFIX}/videoTranslateQuotaCalculate",
             {
                 "videoDuration": video_duration,
@@ -1119,6 +1235,13 @@ class TranslationClient:
                 "subtitleType": subtitle_type,
             },
         )
+        if video_duration and video_duration < 1000:
+            result["unitWarning"] = (
+                f"传入的 video_duration={video_duration:g} 不足 1000 毫秒（1 秒）。"
+                "这个参数的单位是毫秒，确认一下是不是把秒当毫秒传了——"
+                "传错会让试算额度远低于实际扣费。"
+            )
+        return result
     
     async def search_video_translate_page(
         self,
@@ -1130,14 +1253,25 @@ class TranslationClient:
         params = {"pageNum": page_num, "pageSize": page_size}
         if status is not None:
             params["status"] = status
-        return await self._post(f"{VIDEO_PREFIX}/searchVideoTranslatePage", params)
+        result = await self._post(f"{VIDEO_PREFIX}/searchVideoTranslatePage", params)
+        for record in (result.get("data") or {}).get("records") or []:
+            _annotate_video_status(record)
+        if result.get("code") == "200":
+            result["statusNote"] = (
+                "视频任务状态：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消"
+                "——注意 2 就是完成，和文档翻译的状态码不是一套。"
+                "只保留最近 15 天的记录；各 *Url 为临时签名地址，60 分钟内有效。"
+            )
+        return result
     
     async def get_video_translate_detail(self, order_no: str) -> dict:
-        """查询视频翻译详情"""
-        return await self._post(
+        """查询视频翻译详情（上游是 SSE 流，取第一帧就返回）"""
+        result = await self._post_sse(
             f"{VIDEO_PREFIX}/getVideoTranslateDetail",
             {"videoTranslateOrderNo": order_no},
         )
+        _annotate_video_status(result.get("data") or {})
+        return result
     
     async def cancel_video_translate(self, order_no: str) -> dict:
         """取消视频翻译任务"""
@@ -1170,11 +1304,13 @@ class TranslationClient:
         return result
     
     async def get_video_rewrite_detail(self, order_no: str) -> dict:
-        """查询视频字幕改写详情"""
-        return await self._post(
+        """查询视频字幕改写详情（上游是 SSE 流，取第一帧就返回）"""
+        result = await self._post_sse(
             f"{VIDEO_PREFIX}/getVideoTranslateRewriteDetail",
             {"videoTranslateRewriteOrderNo": order_no},
         )
+        _annotate_video_status(result.get("data") or {})
+        return result
     
     async def video_rewrite_quota_calculate(self, order_no: str) -> dict:
         """计算视频字幕改写配额"""

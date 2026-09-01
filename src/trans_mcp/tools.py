@@ -204,7 +204,7 @@ TOOLS = [
     ),
     Tool(
         name="upload_video",
-        description="批量获取视频上传链接",
+        description="获取视频文件的预签名上传地址。拿到后原样执行返回的 uploadCommand 完成上传（只替换文件路径，Content-Disposition 一个字符都不能改，否则 S3 报 SignatureDoesNotMatch）。预签名地址仅 10 分钟有效，取到就传。注意视频和文档走的是不同端点、不同存储路径，视频文件必须用本工具，不能用 upload_document。上传成功后用返回的 objectKey 作为 source_file_object_key 调 translate_video。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -219,7 +219,7 @@ TOOLS = [
     ),
     Tool(
         name="translate_video",
-        description="提交视频翻译任务",
+        description="提交视频翻译任务。⚠️ 本工具会真实扣减账户额度并计入调用次数，提交前必须先用 calculate_video_translation_quota 试算、把预计消耗告诉用户并得到确认，不要自作主张提交。返回 data.videoTranslateOrderNo 是后续所有查询用的订单号。限制：免费用户单个视频最长 10 分钟、每月累计 10 分钟、单文件 200MB、同时只能有 1 个进行中的任务（Pro 为 60 分钟/1024MB/2 个）。若 target_language 传 ar（阿拉伯语）且账号不是付费会员，上游要求人机验证 token，外部调用无法提供，会直接失败。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -241,11 +241,11 @@ TOOLS = [
                 },
                 "voice_role": {
                     "type": "string",
-                    "description": "语音角色，可选 'clone' 或其他角色"
+                    "description": "音色，默认 clone（克隆原声）。注意 clone 且 subtitle_type≠0 时额度翻倍。"
                 },
                 "subtitle_type": {
                     "type": "integer",
-                    "description": "字幕类型，1=硬字幕"
+                    "description": "0=不嵌入字幕, 1=翻译字幕(默认), 2=原始字幕, 3=翻译+原始字幕"
                 }
             },
             "required": ["source_language", "target_language", "source_file_object_key", "video_file_name"]
@@ -253,21 +253,21 @@ TOOLS = [
     ),
     Tool(
         name="calculate_video_translation_quota",
-        description="计算视频翻译配额",
+        description="试算视频翻译要消耗多少额度，不扣费。提交 translate_video 前应当先调这个并把结果告诉用户。计费规则：按 30 秒为一个计费单位向上取整，每单位 4 额度；voice_role=clone 且 subtitle_type≠0 时额度翻倍。",
         inputSchema={
             "type": "object",
             "properties": {
                 "video_duration": {
                     "type": "number",
-                    "description": "视频时长（秒）"
+                    "description": "视频时长，单位是**毫秒**（不是秒）。例如 2 分 5 秒要传 125000。传成秒会让试算额度远低于实际扣费。"
                 },
                 "voice_role": {
                     "type": "string",
-                    "description": "语音角色"
+                    "description": "音色，默认 clone（克隆原声）"
                 },
                 "subtitle_type": {
                     "type": "integer",
-                    "description": "字幕类型"
+                    "description": "0=不嵌入字幕, 1=翻译字幕(默认), 2=原始字幕, 3=翻译+原始字幕"
                 }
             },
             "required": ["video_duration"]
@@ -275,7 +275,7 @@ TOOLS = [
     ),
     Tool(
         name="get_video_translation_status",
-        description="查询视频翻译任务状态",
+        description="查询单个视频翻译任务的状态。上游是 SSE 流，本工具取第一帧数据就返回，不会挂住。状态：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消——注意 2 就是完成，和文档翻译的状态码不是一套，别混用。进行中时 step 表示阶段（1 语音识别 / 2 字幕翻译 / 3 语音生成）。任务通常要几分钟，建议 10-30 秒查一次，并把进度转述给用户。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -289,7 +289,7 @@ TOOLS = [
     ),
     Tool(
         name="list_video_translations",
-        description="查询视频翻译任务列表",
+        description="分页查询视频翻译任务列表，只返回最近 15 天的记录。status 过滤值：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消。完成的记录里 targetFileUrl 是译制视频、targetSubtitlesUrl 是译文字幕，都是临时签名地址、60 分钟有效，必须原样完整交给用户，不能截断签名参数。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -310,7 +310,7 @@ TOOLS = [
     ),
     Tool(
         name="cancel_video_translation",
-        description="取消视频翻译任务",
+        description="取消视频翻译任务。只能取消 status=0（未开始）的任务，已经开始的会返回 31008。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -342,7 +342,7 @@ TOOLS = [
     ),
     Tool(
         name="get_video_subtitles",
-        description="获取视频字幕",
+        description="获取视频的原文与译文字幕下载地址。任务 status 必须是 2（成功），否则返回 31008「文件翻译中」。若该任务已有改写记录，返回的是最近一次改写后的字幕。地址 60 分钟有效。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -356,7 +356,7 @@ TOOLS = [
     ),
     Tool(
         name="rewrite_video_subtitles",
-        description="提交视频字幕改写任务",
+        description="用编辑后的字幕重新生成视频。⚠️ 本工具会真实扣减额度并计入调用次数，提交前请把预计消耗告诉用户并得到确认。原任务的 status 必须是 2（成功）。返回 data.videoTranslateRewriteOrderNo 是改写订单号，查进度用 get_video_rewrite_status。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -378,7 +378,7 @@ TOOLS = [
     ),
     Tool(
         name="get_video_rewrite_status",
-        description="查询视频字幕改写状态",
+        description="查询字幕改写任务的进度。上游是 SSE 流，本工具取第一帧数据就返回。状态含义同视频翻译：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消。",
         inputSchema={
             "type": "object",
             "properties": {
