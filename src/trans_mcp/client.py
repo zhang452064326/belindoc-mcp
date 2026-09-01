@@ -424,6 +424,27 @@ class TranslationClient:
     async def close(self):
         await self.client.aclose()
     
+    async def _post(self, path: str, payload: dict) -> dict:
+        """POST 并把 404 翻译成人话
+
+        上游对未部署的接口直接回 404，httpx 抛出来的是一句英文 HTTPStatusError，
+        调用方会当成网络故障，反复重试或者告诉用户「服务器维护中」——实测视频
+        那批接口就是这样被误判的。实际是该接口在当前服务地址上不存在，重试无用。
+        """
+        response = await self.client.post(path, json=payload)
+        if response.status_code == 404:
+            return {
+                "code": "404",
+                "msg": (
+                    f"接口 {path} 在当前服务地址（{API_BASE_URL}）上不存在。"
+                    "这不是网络故障，也不是服务器维护，重试没有意义："
+                    "该功能在这个环境未部署，或路径已变更。请把这句话告诉用户，"
+                    "不要反复重试，也不要改用其他工具凑合。"
+                ),
+            }
+        response.raise_for_status()
+        return response.json()
+
     # ============ 语言相关 ============
     
     async def get_language_enum(self, display_locale: str = "zh") -> dict:
@@ -1058,12 +1079,8 @@ class TranslationClient:
     
     async def video_batch_presigned_upload_url(self, file_name_list: list[str]) -> dict:
         """批量获取视频预签名上传 URL"""
-        response = await self.client.post(
-            f"{VIDEO_PREFIX}/batchPresignedUploadUrl",
-            json={"fileNameList": file_name_list}
-        )
-        response.raise_for_status()
-        result = response.json()
+        result = await self._post(f"{VIDEO_PREFIX}/batchPresignedUploadUrl", {"fileNameList": file_name_list})
+
         _attach_upload_command(result)
         return result
     
@@ -1076,18 +1093,16 @@ class TranslationClient:
         video_task_param: dict,
     ) -> dict:
         """提交视频翻译任务"""
-        response = await self.client.post(
+        return await self._post(
             f"{VIDEO_PREFIX}/submitVideoTranslate",
-            json={
+            {
                 "sourceLanguage": source_language,
                 "targetLanguage": target_language,
                 "sourceFileObjectKey": source_file_object_key,
                 "videoFileName": video_file_name,
                 "videoTaskParam": video_task_param,
-            }
+            },
         )
-        response.raise_for_status()
-        return response.json()
     
     async def video_translate_quota_calculate(
         self,
@@ -1096,16 +1111,14 @@ class TranslationClient:
         subtitle_type: int,
     ) -> dict:
         """计算视频翻译配额"""
-        response = await self.client.post(
+        return await self._post(
             f"{VIDEO_PREFIX}/videoTranslateQuotaCalculate",
-            json={
+            {
                 "videoDuration": video_duration,
                 "voiceRole": voice_role,
                 "subtitleType": subtitle_type,
-            }
+            },
         )
-        response.raise_for_status()
-        return response.json()
     
     async def search_video_translate_page(
         self,
@@ -1117,39 +1130,26 @@ class TranslationClient:
         params = {"pageNum": page_num, "pageSize": page_size}
         if status is not None:
             params["status"] = status
-        response = await self.client.get(
-            f"{VIDEO_PREFIX}/searchVideoTranslatePage",
-            params=params
-        )
-        response.raise_for_status()
-        return response.json()
+        return await self._post(f"{VIDEO_PREFIX}/searchVideoTranslatePage", params)
     
     async def get_video_translate_detail(self, order_no: str) -> dict:
         """查询视频翻译详情"""
-        response = await self.client.get(
+        return await self._post(
             f"{VIDEO_PREFIX}/getVideoTranslateDetail",
-            params={"videoTranslateOrderNo": order_no}
+            {"videoTranslateOrderNo": order_no},
         )
-        response.raise_for_status()
-        return response.json()
     
     async def cancel_video_translate(self, order_no: str) -> dict:
         """取消视频翻译任务"""
-        response = await self.client.post(
-            f"{VIDEO_PREFIX}/cancelVideoTranslateHistory",
-            json={"videoTranslateOrderNo": order_no}
-        )
-        response.raise_for_status()
-        return response.json()
+        result = await self._post(f"{VIDEO_PREFIX}/cancelVideoTranslateHistory", {"videoTranslateOrderNo": order_no})
+        return result
     
     async def get_video_subtitles(self, order_no: str) -> dict:
         """获取视频字幕"""
-        response = await self.client.get(
+        return await self._post(
             f"{VIDEO_PREFIX}/getVideoTranslateSubtitles",
-            params={"videoTranslateOrderNo": order_no}
+            {"videoTranslateOrderNo": order_no},
         )
-        response.raise_for_status()
-        return response.json()
     
     async def submit_video_rewrite(
         self,
@@ -1166,27 +1166,19 @@ class TranslationClient:
         }
         if video_task_param:
             payload["videoTaskParam"] = video_task_param
-        response = await self.client.post(
-            f"{VIDEO_PREFIX}/submitVideoRewrite",
-            json=payload
-        )
-        response.raise_for_status()
-        return response.json()
+        result = await self._post(f"{VIDEO_PREFIX}/submitVideoRewrite", payload)
+        return result
     
     async def get_video_rewrite_detail(self, order_no: str) -> dict:
         """查询视频字幕改写详情"""
-        response = await self.client.get(
+        return await self._post(
             f"{VIDEO_PREFIX}/getVideoTranslateRewriteDetail",
-            params={"videoTranslateRewriteOrderNo": order_no}
+            {"videoTranslateRewriteOrderNo": order_no},
         )
-        response.raise_for_status()
-        return response.json()
     
     async def video_rewrite_quota_calculate(self, order_no: str) -> dict:
         """计算视频字幕改写配额"""
-        response = await self.client.get(
+        return await self._post(
             f"{VIDEO_PREFIX}/videoTranslateRewriteQuotaCalculate",
-            params={"videoTranslateRewriteOrderNo": order_no}
+            {"videoTranslateRewriteOrderNo": order_no},
         )
-        response.raise_for_status()
-        return response.json()
