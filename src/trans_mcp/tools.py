@@ -62,16 +62,38 @@ TOOLS = [
     ),
     Tool(
         name="upload_file",
-        description="上传本地文件到翻译平台（仅 stdio 模式可用，因为读文件的是服务端进程）。传入路径即可，服务端自动完成预签名与上传并返回 objectKey。HTTP 远程模式下本工具不会出现在工具列表中，请用 upload_document。",
+        description="上传本地文件到翻译平台（仅 stdio 模式可用，因为读文件的是服务端进程）。传入路径即可，服务端自动完成预签名与上传。小文件通常在本次调用内就传完并返回 objectKey；大文件等满 wait 秒会先返回一次进度（含文件大小、百分比、速度、预计剩余时间）和 uploadId——请把进度转述给用户，再用 uploadId 调 get_upload_status 继续跟进，上传在后台照常进行。HTTP 远程模式下本工具不会出现在工具列表中，请用 upload_document。",
         inputSchema={
             "type": "object",
             "properties": {
                 "file_path": {
                     "type": "string",
                     "description": "本地文件的完整路径，如 /Users/xxx/document.pdf"
+                },
+                "wait": {
+                    "type": "integer",
+                    "description": "本次最多等待的秒数，默认 8。到点未传完会返回当前进度而非报错。"
                 }
             },
             "required": ["file_path"]
+        }
+    ),
+    Tool(
+        name="get_upload_status",
+        description="查询 upload_file 发起的上传进度（仅 stdio 模式可用）。返回 status：uploading=仍在传（附百分比、已传字节、速度、预计剩余秒数，请转述给用户后再调一次继续跟进）、success=已完成（用返回的 objectKey 作为 fileObjectKey 调 translate_document）、failed=失败（error 里是原因）。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "upload_id": {
+                    "type": "string",
+                    "description": "upload_file 返回的 uploadId"
+                },
+                "wait": {
+                    "type": "integer",
+                    "description": "本次最多等待的秒数，默认 8。到点仍在上传就返回当前进度。"
+                }
+            },
+            "required": ["upload_id"]
         }
     ),
     Tool(
@@ -300,7 +322,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。上游只能轮询、无法推送，因此本工具默认等 45 秒就返回一次当前进度（progress 百分比、排队名次、预计等待秒数）——请把进度转述给用户，再次调用即可继续等待，任务不会中断。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路）；其他版式用 get_document_translation_result 取；finished=false 表示仍在处理，返回中含 progress、排队名次与预计等待秒数，可再次调用本工具继续等待（任务不会因此中断）。",
+        description="等待翻译任务完成。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 45）。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路），其他版式用 get_document_translation_result 取。finished=false 表示仍在处理，此时看 changedSinceLastCall：为 true 说明进度确实动了（progress 百分比、排队名次、totalWaited 累计等待时长），请转述给用户；为 false 说明和上次汇报一模一样，不要再向用户复述一遍，直接再次调用本工具继续等待即可，任务不会因此中断。若任务被服务端取消或失败，返回 code=500 且 data.failed=true，reason 是原因（如 BACKEND_CANCEL）——请先把原因告诉用户，问过用户之后再决定是否用相同参数重试 translate_document，文件不需要重新上传。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -375,7 +397,8 @@ def build_tool_handlers(client: TranslationClient):
         "get_supported_languages": lambda args: client.get_language_enum(args.get("display_locale", "zh")),
         "get_model_list": lambda args: client.get_model_list(),
         "upload_document": lambda args: client.doc_batch_presigned_upload_url(args["file_name_list"]),
-        "upload_file": lambda args: client.upload_file(args["file_path"]),
+        "upload_file": lambda args: client.upload_file(args["file_path"], args.get("wait", 8)),
+        "get_upload_status": lambda args: client.get_upload_status(args["upload_id"], args.get("wait", 8)),
         "translate_document": lambda args: client.batch_submit_translate_task(
             args["file_list"],
             args["source_language"],
@@ -424,7 +447,7 @@ def build_tool_handlers(client: TranslationClient):
             args["target_subtitles_txt"]
         ),
         "get_video_rewrite_status": lambda args: client.get_video_rewrite_detail(args["order_no"]),
-        "wait_for_translation": lambda args: client.wait_for_translation(args["order_no"], args.get("timeout", 300)),
+        "wait_for_translation": lambda args: client.wait_for_translation(args["order_no"], args.get("timeout", 45)),
     }
 
 

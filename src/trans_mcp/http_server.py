@@ -31,7 +31,7 @@ class TransMcpHttpServer:
     # upload_file 由服务端 open() 客户端给的路径，只在 stdio 模式（同机）成立。
     # HTTP 模式的客户端不在本机，且可能经隧道/反代接入，来源地址不可信，
     # 因此一律不暴露该工具。
-    HTTP_HIDDEN_TOOLS = {'upload_file'}
+    HTTP_HIDDEN_TOOLS = {'upload_file', 'get_upload_status'}
     
     @classmethod
     def _visible_tools(cls, request):
