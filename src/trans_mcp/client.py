@@ -1318,3 +1318,149 @@ class TranslationClient:
             f"{VIDEO_PREFIX}/videoTranslateRewriteQuotaCalculate",
             {"videoTranslateRewriteOrderNo": order_no},
         )
+
+    async def wait_for_video_translation(self, order_no: str, timeout: int = 60) -> dict:
+        """等待视频翻译任务完成
+
+        和 wait_for_translation 同一套路子：进度一变就返回，否则最多等 timeout 秒，
+        并按订单号记跨调用的累计等待。
+        视频任务通常要几分钟，文档建议 10-30 秒查一次，所以退避比文档翻译宽。
+        超时不算失败。
+        """
+        import asyncio
+
+        record = _WAITS.setdefault(
+            order_no, {"totalElapsed": 0.0, "calls": 0, "lastKey": None}
+        )
+        record["calls"] += 1
+        _prune_waits()
+
+        start_time = asyncio.get_event_loop().time()
+        interval = 5  # 逐步放宽到 15 秒，文档建议 10-30 秒一次
+        snapshot = {}
+
+        def pending(elapsed: float, changed: bool) -> dict:
+            record["totalElapsed"] += elapsed
+            record["lastKey"] = _wait_key(snapshot)
+            total = record["totalElapsed"]
+            queue = (
+                f"，排队第 {snapshot['queueRank']}/{snapshot['queueTotal']} 位"
+                if snapshot.get("queueRank")
+                else ""
+            )
+            return {
+                "code": "202",
+                "msg": (
+                    f"{snapshot.get('statusText', '处理中')}"
+                    f"{' ' + snapshot['progress'] if snapshot.get('progress') else ''}"
+                    f"（本次等待 {_format_duration(elapsed)}，"
+                    f"累计已等待 {_format_duration(total)}，第 {record['calls']} 次查询）"
+                    f"{queue}。请把上面这行进度原样告诉用户"
+                    + ("（进度有更新）" if changed else "（进度与上次相同，也照样说，不要沉默或跳过）")
+                    + "，然后再次调用 wait_for_video_translation 继续等待。"
+                ),
+                "data": {
+                    "orderNo": order_no,
+                    "elapsed": round(elapsed),
+                    "totalElapsedSeconds": round(total),
+                    "totalWaited": _format_duration(total),
+                    "pollCount": record["calls"],
+                    "changedSinceLastCall": changed,
+                    "finished": False,
+                    **snapshot,
+                },
+            }
+
+        while True:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                return pending(elapsed, changed=False)
+
+            detail = await self.get_video_translate_detail(order_no)
+            if detail.get("code") not in ("200", 200):
+                _WAITS.pop(order_no, None)
+                return detail
+
+            data = detail.get("data") or {}
+            status = data.get("status")
+            total = record["totalElapsed"] + elapsed
+
+            if status == VIDEO_STATUS_DONE:
+                _WAITS.pop(order_no, None)
+                target = data.get("targetFileUrl")
+                return {
+                    "code": "200",
+                    "msg": f"视频翻译完成（累计等待 {_format_duration(total)}）",
+                    "data": {
+                        "orderNo": order_no,
+                        "finished": True,
+                        "videoFileName": data.get("videoFileName"),
+                        "sourceLanguage": data.get("sourceLanguage"),
+                        "targetLanguage": data.get("targetLanguage"),
+                        "videoDurationMs": data.get("videoDuration"),
+                        "elapsed": round(elapsed),
+                        "totalElapsedSeconds": round(total),
+                        "totalWaited": _format_duration(total),
+                        "translatedVideoUrl": target,
+                        "sourceVideoUrl": data.get("sourceFileUrl"),
+                        "targetSubtitlesUrl": data.get("targetSubtitlesUrl"),
+                        "sourceSubtitlesUrl": data.get("sourceSubtitlesUrl"),
+                        "usedFreeQuota": data.get("freeTranslateQuota"),
+                        "usedWalletQuota": data.get("walletTranslateQuota"),
+                        "downloadNote": (
+                            "translatedVideoUrl 是译制后的视频，targetSubtitlesUrl 是译文字幕。"
+                            + _URL_VERBATIM_NOTE
+                            + _expiry_note(target)
+                            + "要人工校对字幕再重新生成，用 get_video_subtitles 取字幕、"
+                            "改好后调 rewrite_video_subtitles（会再次扣费）。"
+                        ),
+                    },
+                }
+
+            if status in VIDEO_STATUS_TERMINAL:
+                # 3 失败 / 4 已取消
+                _WAITS.pop(order_no, None)
+                reason = data.get("errorMessage") or VIDEO_STATUS_TEXT.get(status, "")
+                return {
+                    "code": "500",
+                    "msg": (
+                        f"视频任务已终止：{VIDEO_STATUS_TEXT.get(status, status)}"
+                        f"{'（' + reason + '）' if data.get('errorMessage') else ''}"
+                        f"，累计等待 {_format_duration(total)}。"
+                        "请把失败原因告诉用户，问过用户之后再决定是否重新提交，"
+                        "不要自己直接重提——重新提交会再次扣费。"
+                    ),
+                    "data": {
+                        "orderNo": order_no,
+                        "finished": True,
+                        "failed": True,
+                        "status": status,
+                        "statusText": VIDEO_STATUS_TEXT.get(status, str(status)),
+                        "reason": reason,
+                        "totalElapsedSeconds": round(total),
+                    },
+                }
+
+            # 0 未开始 / 1 进行中
+            status_text = VIDEO_STATUS_TEXT.get(status, f"未知({status})")
+            if data.get("stepText"):
+                status_text = f"{status_text}（{data['stepText']}）"
+            snapshot = {
+                "statusText": status_text,
+                "videoFileName": data.get("videoFileName"),
+            }
+            progress_info = data.get("progress") or {}
+            if progress_info:
+                snapshot["progress"] = f"{float(progress_info.get('progress') or 0):.1f}%"
+                snapshot["queueRank"] = progress_info.get("taskRanking")
+                snapshot["queueTotal"] = progress_info.get("totalTask")
+                snapshot["predictWaitSeconds"] = progress_info.get("predictWaitTime")
+
+            key = _wait_key(snapshot)
+            if record["lastKey"] is None:
+                record["lastKey"] = key
+            elif key != record["lastKey"] and elapsed >= _WAIT_MIN_SECONDS:
+                return pending(elapsed, changed=True)
+
+            await asyncio.sleep(interval)
+            interval = min(interval + 2, 15)

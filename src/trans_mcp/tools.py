@@ -288,6 +288,24 @@ TOOLS = [
         }
     ),
     Tool(
+        name="wait_for_video_translation",
+        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 60）。视频任务通常要几分钟。finished=false 时请把返回 msg 里那行进度告诉用户——不管 changedSinceLastCall 是 true 还是 false 都要说，和上次一样也照样说一遍，不要沉默跳过，然后再次调用本工具继续等待，任务不会因此中断。完成时返回 translatedVideoUrl（译制视频）、targetSubtitlesUrl（译文字幕）等地址，均为临时签名地址、60 分钟有效，必须原样完整交给用户。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "视频翻译订单号，即 translate_video 返回的 videoTranslateOrderNo"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "本次最多等待的秒数，默认 60。到点未完成会返回当前进度而非报错，可再次调用继续等待。"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
         name="list_video_translations",
         description="分页查询视频翻译任务列表，只返回最近 15 天的记录。status 过滤值：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消。完成的记录里 targetFileUrl 是译制视频、targetSubtitlesUrl 是译文字幕，都是临时签名地址、60 分钟有效，必须原样完整交给用户，不能截断签名参数。",
         inputSchema={
@@ -437,6 +455,9 @@ def build_tool_handlers(client: TranslationClient):
             args.get("subtitle_type", 1)
         ),
         "get_video_translation_status": lambda args: client.get_video_translate_detail(args["order_no"]),
+        "wait_for_video_translation": lambda args: client.wait_for_video_translation(
+            args["order_no"], args.get("timeout", 60)
+        ),
         "list_video_translations": lambda args: client.search_video_translate_page(
             args.get("page_num", 1),
             args.get("page_size", 10),
