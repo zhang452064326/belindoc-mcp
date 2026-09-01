@@ -12,6 +12,21 @@ cd "$DIR" || exit 1
 
 PORT="${MCP_PORT:-8080}"
 LOG="$DIR/server.log"
+PATTERN="trans_mcp.http_server"
+
+is_running() {
+    pgrep -f "$PATTERN" > /dev/null 2>&1
+}
+
+wait_gone() {
+    # 轮询等进程真正消失，参数为最多等多少个 0.1 秒；退干净返回 0
+    local waited=0
+    while is_running && [ "$waited" -lt "$1" ]; do
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    ! is_running
+}
 
 ensure_venv() {
     if [ ! -x ".venv/bin/python" ]; then
@@ -37,7 +52,7 @@ ensure_venv() {
 
 case "$1" in
     start)
-        if pgrep -f "trans_mcp.http_server" > /dev/null; then
+        if is_running; then
             echo -e "${YELLOW}服务器已在运行${NC}"
             exit 0
         fi
@@ -47,7 +62,7 @@ case "$1" in
         [ -f .env ] && export $(grep -v '^#' .env | grep -v '^$' | xargs)
         MCP_PORT="$PORT" nohup .venv/bin/python -m trans_mcp.http_server > "$LOG" 2>&1 &
         sleep 1
-        if pgrep -f "trans_mcp.http_server" > /dev/null; then
+        if is_running; then
             echo "服务器已在后台启动 (日志: $LOG)"
             echo "MCP 端点: http://localhost:$PORT/mcp"
         else
@@ -57,12 +72,28 @@ case "$1" in
         fi
         ;;
     stop)
+        if ! is_running; then
+            echo -e "${YELLOW}服务器未在运行${NC}"
+            exit 0
+        fi
         echo -e "${RED}停止 Trans MCP Server...${NC}"
-        pkill -f "trans_mcp.http_server"
+        pkill -f "$PATTERN"
+        # pkill 发完信号就返回，进程还要一会儿才真正退出。不等它退干净，
+        # 紧接着的 start 会撞见旧进程、判定「服务器已在运行」直接跳过启动，
+        # restart 就成了空转（只停不起）。
+        if ! wait_gone 100; then          # 10 秒
+            echo -e "${YELLOW}10 秒未退出，强制结束${NC}"
+            pkill -9 -f "$PATTERN"
+            wait_gone 30 > /dev/null      # 3 秒
+        fi
+        if is_running; then
+            echo -e "${RED}进程仍未退出，请手动检查: pgrep -lf '$PATTERN'${NC}"
+            exit 1
+        fi
         echo "服务器已停止"
         ;;
     status)
-        if pgrep -f "trans_mcp.http_server" > /dev/null; then
+        if is_running; then
             echo -e "${GREEN}服务器正在运行${NC}"
             curl -s "http://localhost:$PORT/health"
             echo
@@ -71,8 +102,7 @@ case "$1" in
         fi
         ;;
     restart)
-        $0 stop
-        sleep 1
+        $0 stop || exit 1
         $0 start
         ;;
     logs)
