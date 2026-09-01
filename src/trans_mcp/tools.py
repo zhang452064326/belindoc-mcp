@@ -10,7 +10,7 @@ from mcp.types import (
     CallToolRequestParams,
     PaginatedRequestParams,
 )
-from .client import TranslationClient
+from .client import TranslationClient, _build_video_task_param
 
 
 
@@ -219,7 +219,7 @@ TOOLS = [
     ),
     Tool(
         name="translate_video",
-        description="提交视频翻译任务。⚠️ 本工具会真实扣减账户额度并计入调用次数，提交前必须先用 calculate_video_translation_quota 试算、把预计消耗告诉用户并得到确认，不要自作主张提交。返回 data.videoTranslateOrderNo 是后续所有查询用的订单号。限制：免费用户单个视频最长 10 分钟、每月累计 10 分钟、单文件 200MB、同时只能有 1 个进行中的任务（Pro 为 60 分钟/1024MB/2 个）。若 target_language 传 ar（阿拉伯语）且账号不是付费会员，上游要求人机验证 token，外部调用无法提供，会直接失败。",
+        description="提交视频翻译任务。⚠️ 本工具会真实扣减账户额度并计入调用次数，提交前必须先用 calculate_video_translation_quota 试算、把预计消耗告诉用户并得到确认，不要自作主张提交。voice_role 与 subtitle_type 决定这次翻译到底做什么：两者都关（voice_role 传 No 且 subtitle_type=0）等于既不配音也不嵌字幕，产出的视频和原片没有区别，但一样扣费——上游不拦这个组合，请在提交前自行拦下并问用户。返回 data.videoTranslateOrderNo 是后续所有查询用的订单号。限制：免费用户单个视频最长 10 分钟、每月累计 10 分钟、单文件 200MB、同时只能有 1 个进行中的任务（Pro 为 60 分钟/1024MB/2 个）。若 target_language 传 ar（阿拉伯语）且账号不是付费会员，上游要求人机验证 token，外部调用无法提供，会直接失败。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -241,11 +241,15 @@ TOOLS = [
                 },
                 "voice_role": {
                     "type": "string",
-                    "description": "音色，默认 clone（克隆原声）。注意 clone 且 subtitle_type≠0 时额度翻倍。"
+                    "description": "配音开关，只有两个取值：No=不配音、只做字幕翻译（默认，与产品前端一致）；clone=克隆原说话人音色做配音。clone 且 subtitle_type≠0 时**额度翻倍**——10 分钟视频 80 额度会变成 160，所以要不要配音必须先问用户，不要替他决定。服务端对本字段只校验非空，填其他值不会报错但会白扣额度，不要传这两个之外的值。"
                 },
                 "subtitle_type": {
                     "type": "integer",
                     "description": "0=不嵌入字幕, 1=翻译字幕(默认), 2=原始字幕, 3=翻译+原始字幕"
+                },
+                "video_task_param": {
+                    "type": "object",
+                    "description": "完整的生成参数，覆盖 voice_role / subtitle_type 这两个快捷参数。配音：voiceRate 语速、volume 音量、pitch 音调（均为 +0% / +0Hz 这类字符串）、voiceAutorate 语音自动变速、videoAutorate 视频自动变速（默认都 true）。字幕样式：fontsize 字号(默认14)、fontname 字体、fontcolor 颜色(#RRGGBB)、fontbold 加粗、subtitlePosX 水平位置 5-95(50居中)、subtitlePosY 底边距 0-90、fontbordercolor 描边色、outline 描边宽 0-10(0关闭)、shadow 阴影 0-10(0关闭)、backgroundcolor 背景框色、borderStyle 1普通描边/3逐行矩形背景框。不传的字段走服务端默认值。注意服务端对这些字段一个都不校验，填了非法值不会报错、会照常扣费然后在生成阶段失败，不确定就别传。"
                 }
             },
             "required": ["source_language", "target_language", "source_file_object_key", "video_file_name"]
@@ -253,7 +257,7 @@ TOOLS = [
     ),
     Tool(
         name="calculate_video_translation_quota",
-        description="试算视频翻译要消耗多少额度，不扣费。提交 translate_video 前应当先调这个并把结果告诉用户。计费规则：按 30 秒为一个计费单位向上取整，每单位 4 额度；voice_role=clone 且 subtitle_type≠0 时额度翻倍。",
+        description="试算视频翻译要消耗多少额度，不扣费。提交 translate_video 前应当先调这个并把结果告诉用户。计费规则：按 30 秒为一个计费单位向上取整，每单位 4 额度；voice_role 为 clone 且 subtitle_type≠0 时额度翻倍（实测 10 分钟视频：不配音 80 额度，开克隆配音 160 额度）。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -263,7 +267,7 @@ TOOLS = [
                 },
                 "voice_role": {
                     "type": "string",
-                    "description": "音色，默认 clone（克隆原声）"
+                    "description": "配音开关，只有两个取值：No=不配音、只做字幕翻译（默认，与产品前端一致）；clone=克隆原说话人音色做配音。clone 且 subtitle_type≠0 时**额度翻倍**——10 分钟视频 80 额度会变成 160，所以要不要配音必须先问用户，不要替他决定。服务端对本字段只校验非空，填其他值不会报错但会白扣额度，不要传这两个之外的值。"
                 },
                 "subtitle_type": {
                     "type": "integer",
@@ -389,6 +393,10 @@ TOOLS = [
                 "target_subtitles_txt": {
                     "type": "string",
                     "description": "目标语言字幕文本"
+                },
+                "video_task_param": {
+                    "type": "object",
+                    "description": "可选，完整生成参数，覆盖首次提交时的参数；不传则沿用原任务的参数。字段同 translate_video 的 video_task_param。"
                 }
             },
             "required": ["order_no", "source_subtitles_txt", "target_subtitles_txt"]
@@ -444,14 +452,15 @@ def build_tool_handlers(client: TranslationClient):
             args["target_language"],
             args["source_file_object_key"],
             args["video_file_name"],
-            {
-                "voiceRole": args.get("voice_role", "clone"),
-                "subtitleType": args.get("subtitle_type", 1)
-            }
+            _build_video_task_param(
+                args.get("voice_role", "No"),
+                args.get("subtitle_type", 1),
+                args.get("video_task_param"),
+            )
         ),
         "calculate_video_translation_quota": lambda args: client.video_translate_quota_calculate(
             args["video_duration"],
-            args.get("voice_role", "clone"),
+            args.get("voice_role", "No"),
             args.get("subtitle_type", 1)
         ),
         "get_video_translation_status": lambda args: client.get_video_translate_detail(args["order_no"]),
@@ -468,7 +477,8 @@ def build_tool_handlers(client: TranslationClient):
         "rewrite_video_subtitles": lambda args: client.submit_video_rewrite(
             args["order_no"],
             args["source_subtitles_txt"],
-            args["target_subtitles_txt"]
+            args["target_subtitles_txt"],
+            args.get("video_task_param"),
         ),
         "get_video_rewrite_status": lambda args: client.get_video_rewrite_detail(args["order_no"]),
         "wait_for_translation": lambda args: client.wait_for_translation(args["order_no"], args.get("timeout", 45)),

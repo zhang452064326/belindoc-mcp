@@ -77,6 +77,44 @@ VIDEO_SUBTITLE_TYPE = {
 VIDEO_QUOTA_UNIT_MS = 30_000
 
 
+# videoTaskParam 的字段。后端把整个对象序列化存库，再原样反序列化成
+# PyVideoGenerateRequest 透传给下游 Python，服务端对内部字段一个都不校验，
+# 所以注释里的取值范围是给下游的契约，传错不会报错、只会白扣额度。
+VIDEO_TASK_PARAM_KEYS = {
+    # 配音
+    "voiceRole", "voiceRate", "volume", "pitch", "voiceAutorate", "videoAutorate", "ttsType",
+    # 字幕
+    "subtitleType", "fontsize", "fontname", "fontcolor", "fontbold",
+    "subtitlePosX", "subtitlePosY", "fontbordercolor", "backgroundcolor",
+    "outline", "shadow", "borderStyle",
+    # 未公开但会透传的
+    "appendVideo", "isSeparate", "onlyVideo", "recognType", "modelName",
+    "translateType", "splitType", "isCuda",
+}
+
+
+def _build_video_task_param(voice_role: str, subtitle_type: int, extra: Optional[dict]) -> dict:
+    """合并快捷参数与完整的 videoTaskParam，显式传入的 extra 优先"""
+    param = {"voiceRole": voice_role, "subtitleType": subtitle_type}
+    for key, value in (extra or {}).items():
+        if value is not None:
+            param[key] = value
+    return param
+
+
+def _check_video_task(param: dict) -> Optional[str]:
+    """拦掉「既不配音也不嵌字幕」——产出的视频和原片没区别，但一样扣费。
+    产品前端明确拒绝这个组合（free-pdf-translate/src/store/video.ts:684），
+    而 /external 后端只校验非空，不拦。"""
+    if str(param.get("voiceRole", "")).lower() == "no" and int(param.get("subtitleType", 1) or 0) == 0:
+        return (
+            "voiceRole=No 且 subtitleType=0 等于既不配音也不嵌字幕，"
+            "产出的视频和原片没有区别，但一样扣额度。请先问用户到底要配音还是要字幕，"
+            "再重新提交：要字幕就把 subtitle_type 设为 1（翻译字幕），要配音就把 voice_role 设为 clone。"
+        )
+    return None
+
+
 def _not_found(path: str) -> dict:
     """404 的可读说明。上游对未部署的接口直接回 404，httpx 抛的是一句英文
     HTTPStatusError，调用方会当成网络故障反复重试、或告诉用户「服务器维护中」。"""
@@ -1203,6 +1241,9 @@ class TranslationClient:
         video_task_param: dict,
     ) -> dict:
         """提交视频翻译任务"""
+        invalid = _check_video_task(video_task_param)
+        if invalid:
+            return {"code": "400", "msg": invalid, "data": {"videoTaskParam": video_task_param}}
         return await self._post(
             f"{VIDEO_PREFIX}/submitVideoTranslate",
             {
@@ -1217,8 +1258,8 @@ class TranslationClient:
     async def video_translate_quota_calculate(
         self,
         video_duration: float,
-        voice_role: str,
-        subtitle_type: int,
+        voice_role: str = "No",
+        subtitle_type: int = 1,
     ) -> dict:
         """计算视频翻译配额
 
