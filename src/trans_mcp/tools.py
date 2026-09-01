@@ -1,12 +1,10 @@
 """MCP 工具定义"""
 
-from typing import Optional
+import sys
 from mcp.server import Server
 from mcp.types import (
     Tool,
     TextContent,
-    ListToolsRequest,
-    CallToolRequest,
     ListToolsResult,
     CallToolResult,
     CallToolRequestParams,
@@ -481,8 +479,10 @@ def register_tools(server: Server, client: TranslationClient):
                 isError=True
             )
     
-    # 注册处理器
-    server.add_request_handler("tools/list", ListToolsRequest, handle_list_tools)
-    server.add_request_handler("tools/call", CallToolRequest, handle_call_tool)
-    
-    print(f"DEBUG: Registered {len(TOOLS)} tools", flush=True)
+    # add_request_handler 要的是 params 模型（RequestParams 的子类），
+    # 不是 ListToolsRequest / CallToolRequest 这种 Request 模型。
+    server.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)
+    server.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)
+
+    # stdio 模式下 stdout 是 JSON-RPC 通道，任何多余输出都会污染协议流
+    print(f"已注册 {len(TOOLS)} 个工具", file=sys.stderr, flush=True)
