@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 import time
 import httpx
 from typing import Optional
@@ -69,8 +70,33 @@ def _available_variants(data: dict) -> dict:
 _URL_VERBATIM_NOTE = (
     "链接请原样完整交给用户：问号后面的签名参数（Signature、Key-Pair-Id、"
     "expires、sign 等）一个字符都不能删、不能截断、不能改写，也不要为了好看"
-    "缩短它，否则会 403 MissingKey。链接有有效期，过期后重新调用本工具取新的。"
+    "缩短它，否则会 403 MissingKey。"
 )
+
+
+def _url_expiry(url: str):
+    """从签名链接里解析剩余有效期（秒）。CloudFront 用 Expires、国内线路用
+    expires，都是 epoch 秒。解析不出来返回 None。"""
+    if not url:
+        return None
+    match = re.search(r"[?&][Ee]xpires=(\d+)", url)
+    if not match:
+        return None
+    return max(0, int(match.group(1)) - time.time())
+
+
+def _expiry_note(url: str) -> str:
+    """把真实有效期写出来。只说一句「有有效期」的话，调用方会自己编一个
+    「约 1 小时」——实测只有 11 分钟，用户照着那个数去下载就已经过期了。"""
+    remaining = _url_expiry(url)
+    if remaining is None:
+        return "链接有有效期，过期后重新调用本工具取新的。"
+    if remaining <= 0:
+        return "链接已过期，请重新调用本工具取新的。"
+    return (
+        f"链接还有 {_format_duration(remaining)}过期，请提醒用户尽快下载"
+        "（有效期就是这个数，不要按经验说成一小时）；过期后重新调用本工具取新的。"
+    )
 
 
 def _variant_hint(file_type: str | None) -> str:
@@ -592,13 +618,13 @@ class TranslationClient:
                 if snapshot.get("sinceSubmit")
                 else ""
             )
-            if changed:
-                tail = "。进度有更新，请告诉用户，然后再次调用 wait_for_translation 继续等待。"
-            else:
-                tail = (
-                    "。与上次汇报相比进度没有变化，不必再向用户复述一遍，"
-                    "直接再次调用 wait_for_translation 继续等待即可。"
-                )
+            # 不管进度变没变，都要求把当前进度说出来。之前写的是「没变化就不必
+            # 复述」，结果调用方在这些回合里什么都不说，界面上只剩一串省略号。
+            tail = (
+                "。请把上面这行进度原样告诉用户"
+                + ("（进度有更新）" if changed else "（进度与上次相同，也照样说，不要沉默或跳过）")
+                + "，然后再次调用 wait_for_translation 继续等待。"
+            )
             return {
                 "code": "202",
                 "msg": (
@@ -608,8 +634,8 @@ class TranslationClient:
                 ),
                 "data": {
                     "orderNo": order_no,
-                    "elapsed": int(elapsed),
-                    "totalElapsedSeconds": int(total),
+                    "elapsed": round(elapsed),
+                    "totalElapsedSeconds": round(total),
                     "totalWaited": _format_duration(total),
                     "pollCount": record["calls"],
                     "changedSinceLastCall": changed,
@@ -658,27 +684,38 @@ class TranslationClient:
                             "status": task_status,
                             "reason": reason,
                             "fileName": data.get("sourceFileName"),
-                            "totalElapsedSeconds": int(total),
+                            "totalElapsedSeconds": round(total),
                             "totalWaited": _format_duration(total),
                         },
                     }
 
                 # 状态见文档 5.2：0 未开始 / 1 解析中 / 2 翻译中 / 3 完成
                 if task_status == TASK_STATUS_DONE:
-                    # 四个版式的地址详情里就有，不必再为拿链接单独调
-                    # getTranslateS3DownloadUrl
+                    # 必须走下载接口拿地址，不能图省事直接用详情里的 targetFileUrl：
+                    # 详情给的是上游默认生成的那份，文件名带 _WM_，是有水印的，而
+                    # isWatermark 只对 getTranslateS3DownloadUrl 生效。
+                    # 先要无水印，账号没这个权限再退回带水印。
+                    download = await self.get_translate_s3_download_url(order_no, 2, 0)
+                    watermark = False
+                    if not download.get("url"):
+                        download = await self.get_translate_s3_download_url(order_no, 2, 1)
+                        watermark = True
+
                     variants = _available_variants(data)
-                    target_url = variants.get(2)
-                    target_url_cn = data.get("targetFileUrl2")
+                    target_url = download.get("url")
+                    target_url_cn = download.get("url2")
                     if not target_url:
-                        # 详情没带译文地址就退回下载接口
-                        fallback = await self.get_translate_s3_download_url(order_no, 2)
-                        target_url = fallback.get("url")
-                        target_url_cn = fallback.get("url2")
+                        # 两次都没拿到，最后退回详情里的地址（带水印）
+                        target_url = variants.get(2)
+                        target_url_cn = data.get("targetFileUrl2")
+                        watermark = True
 
                     total = record["totalElapsed"] + elapsed
                     _WAITS.pop(order_no, None)
 
+                    # 详情里有地址的版式就是真能取到的，比按文件类型猜准。
+                    # 这里只列出有哪些，不带地址——所有下载都走下载接口，
+                    # 免得混进没做水印控制的链接。
                     others = [
                         f"url_type={t} {URL_TYPE_LABELS[t]}"
                         for t in sorted(variants)
@@ -692,15 +729,19 @@ class TranslationClient:
                         "targetLanguage": data["targetLanguage"],
                         "model": data["model"],
                         "textNumber": data.get("textNumber"),
-                        "elapsed": int(elapsed),
-                        "totalElapsedSeconds": int(total),
+                        "elapsed": round(elapsed),
+                        "totalElapsedSeconds": round(total),
                         "totalWaited": _format_duration(total),
+                        "watermark": watermark,
                         "downloadUrl": target_url,
                         "downloadUrlCN": target_url_cn,
                         "downloadNote": (
-                            "downloadUrl 为纯译文。downloadUrlCN 是同一份文件的国内兜底"
-                            "线路（只有纯译文有，对照版式没有兜底线路），前者慢或不通时"
-                            "改用后者。" + _URL_VERBATIM_NOTE
+                            ("这是带水印的版本（账号没有无水印下载权限）。"
+                             if watermark else "这是无水印的纯译文。")
+                            + "downloadUrlCN 是同一份文件的国内兜底线路"
+                            "（只有纯译文有，对照版式没有兜底线路），前者慢或不通时改用后者。"
+                            + _URL_VERBATIM_NOTE
+                            + _expiry_note(target_url)
                             + (
                                 "本文件还可以取这些版式，用 get_document_translation_result："
                                 + "、".join(others) + "。"
@@ -710,15 +751,7 @@ class TranslationClient:
                         ),
                     }
                     if others:
-                        # 详情里已经给了地址，顺手带上，省掉一次调用
-                        payload["otherVariants"] = {
-                            f"url_type={t}": {
-                                "variant": URL_TYPE_LABELS[t],
-                                "url": variants[t],
-                            }
-                            for t in sorted(variants)
-                            if t != 2
-                        }
+                        payload["availableVariants"] = others
                     return {
                         "code": "200",
                         "msg": f"翻译完成（累计等待 {_format_duration(total)}）",
@@ -753,7 +786,8 @@ class TranslationClient:
 
                     if int(progress) != last_logged:
                         last_logged = int(progress)
-                        print(f"[{status_text}] 进度: {progress:.1f}% (已等待 {int(elapsed)}秒)", flush=True)
+                        print(f"[{status_text}] 进度: {progress:.1f}% (已等待 {int(elapsed)}秒)",
+                              file=sys.stderr, flush=True)
                 else:
                     # 既不在进行中也没有终止标记，交给调用方复查，别继续空等
                     _WAITS.pop(order_no, None)
@@ -770,9 +804,11 @@ class TranslationClient:
                 await asyncio.sleep(interval)
                 interval = min(interval + 1, 8)
 
-            except Exception as e:
-                # 网络错误，等待后重试
-                print(f"查询出错: {e}，{interval}秒后重试...", flush=True)
+            except httpx.HTTPError as e:
+                # 只有网络/超时这类瞬时故障才值得重试。原来这里 except Exception，
+                # 连 TypeError、KeyError 都被吞掉后无限重试，最后报成「还在等待」
+                # ——真正的错误彻底看不见。
+                print(f"查询出错: {e}，{interval}秒后重试...", file=sys.stderr, flush=True)
                 await asyncio.sleep(interval)
 
     async def batch_submit_translate_task(
@@ -980,9 +1016,12 @@ class TranslationClient:
             )
             return result
 
+        result["watermark"] = bool(is_watermark)
         result["lineNote"] = (
-            "url 走 CloudFront；url2 为国内中转线路（部分存储类型为 null），"
+            ("这是带水印的版本。" if is_watermark else "这是无水印版本。")
+            + "url 走 CloudFront；url2 为国内中转线路（部分存储类型为 null），"
             "海外线路不通时改用它。" + _URL_VERBATIM_NOTE
+            + _expiry_note(result.get("url"))
         )
         return result
     
