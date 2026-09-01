@@ -28,6 +28,14 @@ URL_TYPE_SUPPORT = {
     4: "仅 PDF 与 EPUB",
 }
 VIDEO_PREFIX = "/external/videoTranslate"
+# 下载链接是带签名的：CloudFront 靠 Signature/Key-Pair-Id，国内线路靠 sign，
+# 全挂在问号后面。实测把 ? 之后截掉会直接 403 MissingKey。转述时顺手把长链接
+# 截短是很自然的动作，所以每条返回都得把这句话摆在明面上。
+_URL_VERBATIM_NOTE = (
+    "链接请原样完整交给用户：问号后面的签名参数（Signature、Key-Pair-Id、"
+    "expires、sign 等）一个字符都不能删、不能截断、不能改写，也不要为了好看"
+    "缩短它，否则会 403 MissingKey。链接有有效期，过期后重新调用本工具取新的。"
+)
 
 
 def _variant_hint(file_type: str | None) -> str:
@@ -625,7 +633,8 @@ class TranslationClient:
                             "downloadNote": (
                                 "以上为纯译文。downloadUrl 走 CloudFront，"
                                 "downloadUrlCN 为国内兜底线路，前者慢或不通时改用后者。"
-                                "其他版式用 get_document_translation_result 取："
+                                + _URL_VERBATIM_NOTE
+                                + "其他版式用 get_document_translation_result 取："
                                 + _variant_hint(data.get("fileType"))
                             ),
                         }
@@ -837,7 +846,10 @@ class TranslationClient:
             )
             return result
         
-        result["lineNote"] = "url 走 CloudFront；url2 为国内兜底线路，海外线路不通时改用它。"
+        result["lineNote"] = (
+            "url 走 CloudFront；url2 为国内兜底线路，海外线路不通时改用它。"
+            + _URL_VERBATIM_NOTE
+        )
         return result
     
     # ============ 图片翻译 ============

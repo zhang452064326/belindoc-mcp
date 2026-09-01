@@ -149,7 +149,7 @@ TOOLS = [
     ),
     Tool(
         name="get_document_translation_result",
-        description="获取文档翻译结果下载链接。url_type 决定版式：1=原文、2=纯译文（默认）、3=横向对照（左右并排，仅 PDF）、4=纵向对照（原文与译文上下排列，仅 PDF 与 EPUB）。要译文不要传 1。返回的 url 走 CloudFront，url2 为国内兜底线路。",
+        description="获取文档翻译结果下载链接。url_type 决定版式：1=原文、2=纯译文（默认）、3=横向对照（左右并排，仅 PDF）、4=纵向对照（原文与译文上下排列，仅 PDF 与 EPUB）。要译文不要传 1。返回的 url 走 CloudFront，url2 为国内兜底线路。两条链接都带签名参数，转述给用户时必须连问号后面的 Signature/Key-Pair-Id/expires/sign 一起原样给全，截断或缩短会导致 403 MissingKey。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -322,7 +322,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 45）。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路），其他版式用 get_document_translation_result 取。finished=false 表示仍在处理，此时看 changedSinceLastCall：为 true 说明进度确实动了（progress 百分比、排队名次、totalWaited 累计等待时长），请转述给用户；为 false 说明和上次汇报一模一样，不要再向用户复述一遍，直接再次调用本工具继续等待即可，任务不会因此中断。若任务被服务端取消或失败，返回 code=500 且 data.failed=true，reason 是原因（如 BACKEND_CANCEL）——请先把原因告诉用户，问过用户之后再决定是否用相同参数重试 translate_document，文件不需要重新上传。",
+        description="等待翻译任务完成。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 45）。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路），其他版式用 get_document_translation_result 取。这两条链接带签名，转述时必须把问号后面的参数一起原样给全，截断会 403。finished=false 表示仍在处理，此时看 changedSinceLastCall：为 true 说明进度确实动了（progress 百分比、排队名次、totalWaited 累计等待时长），请转述给用户；为 false 说明和上次汇报一模一样，不要再向用户复述一遍，直接再次调用本工具继续等待即可，任务不会因此中断。若任务被服务端取消或失败，返回 code=500 且 data.failed=true，reason 是原因（如 BACKEND_CANCEL）——请先把原因告诉用户，问过用户之后再决定是否用相同参数重试 translate_document，文件不需要重新上传。",
         inputSchema={
             "type": "object",
             "properties": {
