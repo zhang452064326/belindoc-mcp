@@ -11,8 +11,25 @@ API_BASE_URL = "http://internal-test-host:6101"
 # 生产环境（取消注释切换）
 # API_BASE_URL = "https://belindoc.com/api"
 DOC_PREFIX = "/external/translate"
-# 上游瞬时错误码：600 = System is busy
-TRANSIENT_CODES = {"600"}
+# 上游瞬时错误码，重试即可（见 docs/document-translation-api-guide.md 常见错误）：
+#   600   System is busy
+#   30010 并发任务超过限制，等在跑的任务完成后重试
+#   30012 任务重复提交，稍后重试
+TRANSIENT_CODES = {"600", "30010", "30012"}
+# 需要重新上传、重试提交没用的错误码
+REUPLOAD_CODES = {"30014": "上传的文件已失效，需要重新获取预签名地址并上传"}
+# 任务状态，见文档 5.2。注意 1=解析中：漏了它会把正常的中间态当成未知状态。
+TASK_STATUS_TEXT = {
+    0: "未开始",
+    1: "解析中",
+    2: "翻译中",
+    3: "翻译完成",
+    4: "翻译失败",
+    5: "已取消",
+}
+TASK_STATUS_PENDING = (0, 1, 2)
+TASK_STATUS_DONE = 3
+TASK_STATUS_FAILED = {4: "翻译失败", 5: "已取消"}
 # 下载版式。实测各文件类型的支持情况：
 #   PDF   1 2 3 4        EPUB  1 2 4（流式排版无法左右并排）
 #   DOCX  1 2
@@ -27,7 +44,25 @@ URL_TYPE_SUPPORT = {
     3: "仅 PDF",
     4: "仅 PDF 与 EPUB",
 }
+# 各版式在 getTranslateFileDetail 详情里对应的字段。任务完成后这些地址就已经
+# 在详情里了，不必再为了拿链接单独调 getTranslateS3DownloadUrl。
+# 注意只有纯译文有 2 号兜底地址，对照版式没有——别对它们承诺国内线路。
+URL_TYPE_FIELDS = {
+    2: ("targetFileUrl", "targetFileUrl2"),
+    3: ("xComparisonS3Url", None),
+    4: ("yComparisonS3Url", None),
+}
 VIDEO_PREFIX = "/external/videoTranslate"
+
+
+def _available_variants(data: dict) -> dict:
+    """详情里实际存在的版式 -> 地址。比按文件类型猜准，因为这是上游真给了的。"""
+    found = {}
+    for url_type, (field, _) in URL_TYPE_FIELDS.items():
+        if data.get(field):
+            found[url_type] = data[field]
+    return found
+
 # 下载链接是带签名的：CloudFront 靠 Signature/Key-Pair-Id，国内线路靠 sign，
 # 全挂在问号后面。实测把 ? 之后截掉会直接 403 MissingKey。转述时顺手把长链接
 # 截短是很自然的动作，所以每条返回都得把这句话摆在明面上。
@@ -39,7 +74,11 @@ _URL_VERBATIM_NOTE = (
 
 
 def _variant_hint(file_type: str | None) -> str:
-    """按文件类型说明可用的版式，避免调用方去试注定失败的取值"""
+    """按文件类型说明可用的版式，避免调用方去试注定失败的取值
+
+    只在拿不到详情、无从确认时用。手上有详情就用 _available_variants，
+    那是上游真给了地址的版式，比按类型猜准。
+    """
     ft = (file_type or "").upper()
     if ft == "PDF":
         return "url_type=1 原文、3 横向对照（左右并排）、4 纵向对照（原文与译文上下排列）。"
@@ -179,12 +218,27 @@ _TERMINAL_KEYS = (
 
 
 def _terminal_reason(task_status, data: dict):
-    """认出「任务已经结束、但不是成功」的情况，返回可读原因；正常状态返回 None"""
-    candidates = [task_status] + [data.get(k) for k in _TERMINAL_KEYS]
-    for value in candidates:
-        if isinstance(value, str) and any(m in value.upper() for m in _TERMINAL_MARKERS):
-            return value
-    return None
+    """认出「任务已经结束、但不是成功」的情况，返回可读原因；正常状态返回 None
+
+    两种形态都要认：文档定义的终止码是整数 4/5，而实测上游也会把 status 直接
+    换成字符串（见过 "BACKEND_CANCEL"）。只判字符串会漏掉前者，只判数字会漏掉
+    后者。
+    """
+    reason = None
+    if isinstance(task_status, int) and task_status in TASK_STATUS_FAILED:
+        reason = f"{TASK_STATUS_FAILED[task_status]}（status={task_status}）"
+    else:
+        for value in [task_status] + [data.get(k) for k in _TERMINAL_KEYS]:
+            if isinstance(value, str) and any(m in value.upper() for m in _TERMINAL_MARKERS):
+                reason = value
+                break
+    if reason is None:
+        return None
+    # 文档说 status=4 时看 errorCode，它是数字，上面的字符串扫描抓不到
+    code = data.get("errorCode")
+    if code:
+        reason = f"{reason}，errorCode={code}"
+    return reason
 
 
 
@@ -335,6 +389,8 @@ class TranslationClient:
             headers={
                 "X-Api-Key": api_key,
                 "Content-Type": "application/json",
+                # 不传这个头，上游的错误信息默认回英文
+                "language": "zh-CN",
             },
             timeout=httpx.Timeout(30.0)  # 30秒超时
         )
@@ -404,7 +460,7 @@ class TranslationClient:
         """批量获取文档预签名上传 URL"""
         response = await self.client.post(
             f"{DOC_PREFIX}/batchPresignedUploadUrl",
-            json={"fileNameList": file_name_list}
+            json={"fileNameList": file_name_list, "businessType": 1}
         )
         response.raise_for_status()
         result = response.json()
@@ -607,41 +663,70 @@ class TranslationClient:
                         },
                     }
 
-                # 状态: 0=排队, 2=翻译中, 3=完成
-                if task_status == 3:
-                    # 翻译完成，取译文链接（url_type=2）；1 是原文，不要用
-                    download_result = await self.get_translate_s3_download_url(order_no, 2)
+                # 状态见文档 5.2：0 未开始 / 1 解析中 / 2 翻译中 / 3 完成
+                if task_status == TASK_STATUS_DONE:
+                    # 四个版式的地址详情里就有，不必再为拿链接单独调
+                    # getTranslateS3DownloadUrl
+                    variants = _available_variants(data)
+                    target_url = variants.get(2)
+                    target_url_cn = data.get("targetFileUrl2")
+                    if not target_url:
+                        # 详情没带译文地址就退回下载接口
+                        fallback = await self.get_translate_s3_download_url(order_no, 2)
+                        target_url = fallback.get("url")
+                        target_url_cn = fallback.get("url2")
+
                     total = record["totalElapsed"] + elapsed
                     _WAITS.pop(order_no, None)
 
+                    others = [
+                        f"url_type={t} {URL_TYPE_LABELS[t]}"
+                        for t in sorted(variants)
+                        if t != 2
+                    ]
+                    payload = {
+                        "orderNo": order_no,
+                        "finished": True,
+                        "fileName": data["sourceFileName"],
+                        "sourceLanguage": data["sourceLanguage"],
+                        "targetLanguage": data["targetLanguage"],
+                        "model": data["model"],
+                        "textNumber": data.get("textNumber"),
+                        "elapsed": int(elapsed),
+                        "totalElapsedSeconds": int(total),
+                        "totalWaited": _format_duration(total),
+                        "downloadUrl": target_url,
+                        "downloadUrlCN": target_url_cn,
+                        "downloadNote": (
+                            "downloadUrl 为纯译文。downloadUrlCN 是同一份文件的国内兜底"
+                            "线路（只有纯译文有，对照版式没有兜底线路），前者慢或不通时"
+                            "改用后者。" + _URL_VERBATIM_NOTE
+                            + (
+                                "本文件还可以取这些版式，用 get_document_translation_result："
+                                + "、".join(others) + "。"
+                                if others
+                                else "本文件没有其他可用版式（原文用 url_type=1 取）。"
+                            )
+                        ),
+                    }
+                    if others:
+                        # 详情里已经给了地址，顺手带上，省掉一次调用
+                        payload["otherVariants"] = {
+                            f"url_type={t}": {
+                                "variant": URL_TYPE_LABELS[t],
+                                "url": variants[t],
+                            }
+                            for t in sorted(variants)
+                            if t != 2
+                        }
                     return {
                         "code": "200",
                         "msg": f"翻译完成（累计等待 {_format_duration(total)}）",
-                        "data": {
-                            "orderNo": order_no,
-                            "finished": True,
-                            "fileName": data["sourceFileName"],
-                            "sourceLanguage": data["sourceLanguage"],
-                            "targetLanguage": data["targetLanguage"],
-                            "model": data["model"],
-                            "textNumber": data.get("textNumber"),
-                            "elapsed": int(elapsed),
-                            "totalElapsedSeconds": int(total),
-                            "totalWaited": _format_duration(total),
-                            "downloadUrl": download_result.get("url"),
-                            "downloadUrlCN": download_result.get("url2"),
-                            "downloadNote": (
-                                "以上为纯译文。downloadUrl 走 CloudFront，"
-                                "downloadUrlCN 为国内兜底线路，前者慢或不通时改用后者。"
-                                + _URL_VERBATIM_NOTE
-                                + "其他版式用 get_document_translation_result 取："
-                                + _variant_hint(data.get("fileType"))
-                            ),
-                        }
+                        "data": payload,
                     }
-                elif task_status in [0, 2]:
-                    # 排队或翻译中，记录快照供返回时带出
-                    status_text = "排队中" if task_status == 0 else "翻译中"
+                elif task_status in TASK_STATUS_PENDING:
+                    # 未开始/解析中/翻译中，记录快照供返回时带出
+                    status_text = TASK_STATUS_TEXT[task_status]
                     snapshot = {
                         "statusText": status_text,
                         "progress": f"{progress:.1f}%",
@@ -705,12 +790,22 @@ class TranslationClient:
         """
         import asyncio
         
+        # 文档 4：启用 OCR 时每个文件也要带 isOcrFile=1；普通文档 isMath/isFlow 传 0
+        files = []
+        for item in file_list:
+            item = dict(item)
+            if is_ocr and "isOcrFile" not in item:
+                item["isOcrFile"] = 1
+            files.append(item)
+
         payload = {
-            "fileList": file_list,
+            "fileList": files,
             "sourceLanguage": source_language,
             "targetLanguage": target_language,
             "model": model,
             "isOcr": is_ocr,
+            "isMath": 0,
+            "isFlow": 0,
         }
         
         result = {}
@@ -725,6 +820,15 @@ class TranslationClient:
             if attempt < 3:
                 await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
         
+        # 这些错误是上传侧的，重试提交没用，必须重新走预签名+上传
+        if result.get("code") in REUPLOAD_CODES:
+            result["msg"] = (
+                f"{result.get('msg')}（{REUPLOAD_CODES[result['code']]}）。"
+                "请重新调 upload_document 取预签名地址并重新上传，"
+                "再用新的 objectKey 提交，重试本工具没有用。"
+            )
+            return result
+
         # 重试后仍失败：明确告知文件无需重传，避免调用方回头做上传
         if result.get("code") in TRANSIENT_CODES:
             result["msg"] = (
@@ -800,55 +904,85 @@ class TranslationClient:
         self,
         order_no: str,
         url_type: int = 2,
+        is_watermark: int = 0,
     ) -> dict:
         """获取翻译文件下载地址
 
         url_type: 1=原文, 2=纯译文, 3=横向对照, 4=纵向对照。
         默认 2——调用方要的通常是译文，取 1 会拿到原文。
 
-        返回的 url 走 CloudFront，url2 走 download.belindoc.com（国内兜底线路）。
+        is_watermark: 0=无水印（默认）, 1=带水印。不传这个参数就是走上游默认值，
+        很可能拿到带水印的文件；能不能要无水印取决于账号权限，没权限时上游会回
+        [ERROR] 事件，这时改传 1。
+
+        返回的 url 走 CloudFront，url2 走国内中转线路（部分存储类型为 null）。
         """
         response = await self.client.post(
             f"{DOC_PREFIX}/getTranslateS3DownloadUrl",
             json={
                 "translateOrderNo": order_no,
                 "urlType": url_type,
+                "isWatermark": is_watermark,
             }
         )
         response.raise_for_status()
-        
-        # 解析 SSE 格式的响应
+
+        # SSE 响应：event:[PROCESS] / [DONE] / [ERROR]，data 紧跟在 event 之后。
+        # 必须跟着 event 走——[ERROR] 的 data 里是 message，当成结果吞掉的话，
+        # 真正的失败原因就丢了，只剩下我们自己猜的「不支持该版式」。
         content = response.text
-        result = {}
+        result, error_msg, event = {}, None, None
         for line in content.split('\n'):
-            if line.startswith('data:') and len(line) > 5:
+            line = line.strip()
+            if line.startswith('event:'):
+                event = line[6:].strip()
+            elif line.startswith('data:') and len(line) > 5:
                 json_str = line[5:].strip()
-                if json_str:
-                    try:
-                        result = json.loads(json_str)
-                    except:
-                        pass
-        
+                if not json_str:
+                    continue
+                try:
+                    parsed = json.loads(json_str)
+                except ValueError:
+                    continue
+                if event == '[ERROR]':
+                    error_msg = (parsed.get("message") if isinstance(parsed, dict) else None) or json_str
+                elif isinstance(parsed, dict):
+                    result = parsed
+
+        variant = URL_TYPE_LABELS.get(url_type, f"未知版式({url_type})")
+
+        if error_msg:
+            return {
+                "code": "500",
+                "urlType": url_type,
+                "variant": variant,
+                "msg": (
+                    f"上游生成「{variant}」下载地址失败：{error_msg}。"
+                    + ("无水印文件需要相应账号权限，可改传 is_watermark=1 重试。"
+                       if is_watermark == 0 else "")
+                ),
+            }
+
         if not result:
-            return {"error": "未获取到下载链接", "raw": content}
-        
+            return {"code": "500", "msg": "未获取到下载链接", "raw": content[:500]}
+
         result["urlType"] = url_type
-        result["variant"] = URL_TYPE_LABELS.get(url_type, f"未知版式({url_type})")
-        
+        result["variant"] = variant
+
         if not result.get("url"):
             # 该文件类型不支持这个版式时，上游只回 "Failed to generate file."
             support = URL_TYPE_SUPPORT.get(url_type)
             result["code"] = "400"
             result["msg"] = (
-                f"该文件不支持「{result['variant']}」版式"
+                f"该文件不支持「{variant}」版式"
                 + (f"（{support} 支持）。" if support else "。")
                 + "请改用 url_type=2 取纯译文，或 url_type=1 取原文。"
             )
             return result
-        
+
         result["lineNote"] = (
-            "url 走 CloudFront；url2 为国内兜底线路，海外线路不通时改用它。"
-            + _URL_VERBATIM_NOTE
+            "url 走 CloudFront；url2 为国内中转线路（部分存储类型为 null），"
+            "海外线路不通时改用它。" + _URL_VERBATIM_NOTE
         )
         return result
     

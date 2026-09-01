@@ -158,6 +158,10 @@ TOOLS = [
                 "url_type": {
                     "type": "integer",
                     "description": "1=原文, 2=纯译文(默认), 3=横向对照/左右并排(仅 PDF), 4=纵向对照/上下排列(仅 PDF 与 EPUB)"
+                },
+                "is_watermark": {
+                    "type": "integer",
+                    "description": "0=无水印（默认），1=带水印。无水印需要账号权限，若返回失败提示权限不足再改传 1。"
                 }
             },
             "required": ["order_no"]
@@ -407,7 +411,8 @@ def build_tool_handlers(client: TranslationClient):
         "get_document_translation_status": lambda args: client.get_translate_file_detail(args["order_no"]),
         "get_document_translation_result": lambda args: client.get_translate_s3_download_url(
             args["order_no"],
-            args.get("url_type", 2)
+            args.get("url_type", 2),
+            args.get("is_watermark", 0)
         ),
         "list_document_translations": lambda args: client.search_translate_file_page(
             args.get("page_num", 1),
