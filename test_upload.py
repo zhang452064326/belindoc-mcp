@@ -8,7 +8,7 @@ import os
 # API 配置
 API_BASE_URL = "http://internal-test-host:6101"
 DOC_PREFIX = "/external/translate"
-API_KEY = "ft_REDACTED_KEY_ROTATED"
+API_KEY = os.environ.get("BELINDOC_API_KEY", "")
 
 
 async def test_upload():

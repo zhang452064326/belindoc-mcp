@@ -10,7 +10,7 @@
     "trans-mcp": {
       "command": "/Users/zhangjun/project/trans_mcp/.venv/bin/trans-mcp",
       "env": {
-        "BELINDOC_API_KEY": "ft_REDACTED_KEY_ROTATED"
+        "BELINDOC_API_KEY": "ft_你的API密钥"
       }
     }
   }
@@ -27,7 +27,7 @@
     "trans-mcp": {
       "command": "/Users/zhangjun/project/trans_mcp/.venv/bin/trans-mcp",
       "env": {
-        "BELINDOC_API_KEY": "ft_REDACTED_KEY_ROTATED"
+        "BELINDOC_API_KEY": "ft_你的API密钥"
       }
     }
   }
@@ -38,7 +38,7 @@
 
 在 `.env` 文件中配置：
 ```bash
-BELINDOC_API_KEY=ft_REDACTED_KEY_ROTATED
+BELINDOC_API_KEY=ft_你的API密钥
 ```
 
 然后启动时加载：
