@@ -35,3 +35,10 @@ Thumbs.db
 # Temp
 *.tmp
 *.bak
+
+# 测试用的音视频素材。放在 docs/ 下方便对着跑，但几 MB 的二进制不该进仓库，
+# 文档本身（*.md）照常跟踪。
+docs/*.mp4
+docs/*.mov
+docs/*.mp3
+docs/*.wav
