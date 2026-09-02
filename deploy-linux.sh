@@ -14,6 +14,8 @@ echo -e "${GREEN}=== Trans MCP Server 部署脚本 ===${NC}"
 INSTALL_DIR="/opt/trans-mcp"
 SERVICE_NAME="trans-mcp"
 PORT=${1:-8080}
+# 落地页可能已占用 /mcp，服务端点可以让开；用法: ./deploy-linux.sh [端口] [路径]
+MCP_PATH=${2:-/mcp}
 
 # 检查 Python
 if ! command -v python3 &> /dev/null; then
@@ -26,9 +28,10 @@ echo "创建安装目录: $INSTALL_DIR"
 sudo mkdir -p $INSTALL_DIR
 sudo chown $USER:$USER $INSTALL_DIR
 
-# 复制项目文件
-echo "复制项目文件..."
-cp -r /Users/zhangjun/project/trans_mcp/* $INSTALL_DIR/
+# 复制项目文件（默认取脚本所在目录，可用 SRC_DIR 覆盖）
+SRC_DIR="${SRC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+echo "复制项目文件: $SRC_DIR -> $INSTALL_DIR"
+cp -r "$SRC_DIR"/* $INSTALL_DIR/
 cd $INSTALL_DIR
 
 # 创建虚拟环境
@@ -44,9 +47,11 @@ pip install -e .
 if [ ! -f .env ]; then
     echo "创建 .env 文件..."
     cat > .env << EOF
-BELINDOC_API_KEY=ft_REDACTED_KEY_ROTATED
+# API Key 不在这里配：HTTP 模式下每个客户端自己带
+# Authorization: Bearer <key>，服务器不存任何密钥
 MCP_HOST=0.0.0.0
 MCP_PORT=$PORT
+MCP_PATH=$MCP_PATH
 EOF
 fi
 
@@ -81,16 +86,19 @@ echo ""
 echo "服务状态: sudo systemctl status $SERVICE_NAME"
 echo "查看日志: sudo journalctl -u $SERVICE_NAME -f"
 echo ""
-echo "MCP Server 地址: http://$(hostname -I | awk '{print $1}'):$PORT"
-echo "SSE 端点: http://$(hostname -I | awk '{print $1}'):$PORT/sse"
-echo "消息端点: http://$(hostname -I | awk '{print $1}'):$PORT/message"
+IP=$(hostname -I | awk '{print $1}')
+echo "MCP 端点: http://$IP:$PORT$MCP_PATH"
+echo "SSE 端点: http://$IP:$PORT/sse"
+echo "健康检查: http://$IP:$PORT/health"
 echo ""
 echo -e "${YELLOW}本机配置:${NC}"
 cat << EOF
 {
   "mcpServers": {
     "trans-mcp": {
-      "url": "http://YOUR_SERVER_IP:$PORT/sse"
+      "type": "streamablehttp",
+      "url": "http://YOUR_SERVER_IP:$PORT$MCP_PATH",
+      "headers": { "Authorization": "Bearer 你的API密钥" }
     }
   }
 }

@@ -8,6 +8,8 @@ services:
     environment:
       - MCP_HOST=0.0.0.0
       - MCP_PORT=8080
+      # 落地页占用 /mcp 时改这里，客户端 URL 要同步改
+      - MCP_PATH=${MCP_PATH:-/mcp}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

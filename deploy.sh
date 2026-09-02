@@ -9,6 +9,8 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 PORT=${1:-8080}
+# 落地页可能已占用 /mcp，服务端点可以让开；用法: ./deploy.sh [端口] [路径]
+MCP_PATH=${2:-/mcp}
 INSTALL_DIR="/opt/trans-mcp"
 
 echo -e "${GREEN}=== Trans MCP Server 部署 ===${NC}"
@@ -37,7 +39,8 @@ if [ ! -f .env ]; then
     cat > .env << EOF
 # Trans MCP Server 配置
 MCP_HOST=0.0.0.0
-MCP_PORT=8080
+MCP_PORT=$PORT
+MCP_PATH=$MCP_PATH
 EOF
     
     echo -e "${GREEN}配置完成${NC}"
@@ -57,7 +60,8 @@ echo ""
 echo "服务状态:"
 docker-compose ps
 echo ""
-echo "访问地址: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):$PORT"
+IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')
+echo "MCP 端点: http://$IP:$PORT$MCP_PATH"
 echo ""
 echo -e "${YELLOW}本机配置:${NC}"
 echo '{
