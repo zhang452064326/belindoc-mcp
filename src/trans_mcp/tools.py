@@ -14,8 +14,11 @@ from mcp.types import (
 )
 from .client import (
     TranslationClient,
+    TASK_STATUS_DONE,
     VIDEO_STATUS_DONE,
     annotate_key_error,
+    comparison_offer,
+    comparison_variants,
     key_never_uploaded,
     slim_video_record,
     strip_long_urls,
@@ -797,6 +800,17 @@ async def _doc_status(client, order_no: str) -> dict:
         slim["downloadNote"] = _DOC_URL_NOTE.format(fields="、".join(dropped))
     result = dict(result)
     result["data"] = slim
+    # 完成的 PDF / EPUB 还能取对照版式。这条查询也是交付现场之一，同样要主动报，
+    # 不能只在 wait_for_translation 那一条路上说。
+    if data.get("status") == TASK_STATUS_DONE:
+        offer = comparison_offer(data)
+        if offer:
+            slim["comparisonVariants"] = list(comparison_variants(data))
+            result["msg"] = (
+                offer + "——这一句请主动告诉用户（他不问也要说）。他要哪一版，"
+                "就用 get_document_translation_result 按对应 url_type 取："
+                "3=横向对照（左右并排）、4=纵向对照（上下排列）。"
+            )
     return result
 
 

@@ -437,6 +437,38 @@ def video_products(data: dict) -> tuple:
     }
 
 
+# 双语对照版式的支持范围。判据是**文件类型**，不是详情里有没有那条地址——对照版
+# 是按需生成的，详情里没地址不代表这个文件取不到。网页端 free-pdf-translate 的
+# 五处 UI（TaskActions / TransCard / TransHistoryTable / PreviewContent /
+# TranslateClient）都是同一套判定：横向仅 PDF，纵向 PDF 与 EPUB。
+COMPARISON_BY_TYPE = {"PDF": (3, 4), "EPUB": (4,)}
+
+
+def doc_file_type(data: dict) -> str:
+    """记录里的 fileType；缺了就按文件名后缀兜底"""
+    file_type = str(data.get("fileType") or "").strip().upper()
+    if file_type:
+        return file_type
+    name = data.get("sourceFileName") or ""
+    return name.rsplit(".", 1)[-1].upper() if "." in name else ""
+
+
+def comparison_variants(data: dict) -> tuple:
+    """这份文件能取哪几种对照版式（url_type）"""
+    return COMPARISON_BY_TYPE.get(doc_file_type(data), ())
+
+
+def comparison_offer(data: dict) -> str:
+    """完成时主动报出还能要哪种对照版
+
+    网页端把这两项明摆在下载菜单里，接口这边不说，用户就永远不知道有这功能。
+    """
+    variants = comparison_variants(data)
+    if not variants:
+        return ""
+    return t("download.doc.layouts.pdf" if 3 in variants else "download.doc.layouts.epub")
+
+
 def _available_variants(data: dict) -> dict:
     """详情里实际存在的版式 -> 地址。比按文件类型猜准，因为这是上游真给了的。"""
     found = {}
@@ -1493,15 +1525,17 @@ class TranslationClient:
                     # 详情里有地址的版式就是真能取到的，比按文件类型猜准。
                     # 这里只列出有哪些，不带地址——所有下载都走下载接口，
                     # 免得混进没做水印控制的链接。
+                    # 详情里已经有地址的 ∪ 这个类型本来就支持的，去掉纯译文自己
+                    offered = (set(variants) | set(comparison_variants(data))) - {2}
                     others = [
-                        f"url_type={t} {URL_TYPE_LABELS[t]}"
-                        for t in sorted(variants)
-                        if t != 2
+                        f"url_type={n} {URL_TYPE_LABELS[n]}"
+                        for n in sorted(offered)
                     ]
                     payload = {
                         "orderNo": order_no,
                         "finished": True,
                         "fileName": data["sourceFileName"],
+                        "fileType": doc_file_type(data),
                         "sourceLanguage": data["sourceLanguage"],
                         "targetLanguage": data["targetLanguage"],
                         "model": data["model"],
@@ -1521,7 +1555,7 @@ class TranslationClient:
                             + _expiry_note(target_url)
                             + (
                                 "本文件还可以取这些版式，用 get_document_translation_result："
-                                + "、".join(others) + "。"
+                                + "、".join(others) + "；原文用 url_type=1 取。"
                                 if others
                                 else "本文件没有其他可用版式（原文用 url_type=1 取）。"
                             )
@@ -1529,9 +1563,19 @@ class TranslationClient:
                     }
                     if others:
                         payload["availableVariants"] = others
+                    offer = comparison_offer(data)
                     return {
                         "code": "200",
-                        "msg": f"翻译完成（累计等待 {_format_duration(total)}）",
+                        "msg": (
+                            f"翻译完成（累计等待 {_format_duration(total)}）。"
+                            + (
+                                offer + "——这一句请主动告诉用户（他不问也要说：网页端"
+                                "把这两项明摆在下载菜单里，接口这边不说他就不知道有）。"
+                                "他要哪一版，就用 get_document_translation_result 按"
+                                "对应的 url_type 取，别自己替他决定只给纯译文。"
+                                if offer else ""
+                            )
+                        ),
                         "data": payload,
                     }
                 elif task_status in TASK_STATUS_PENDING:

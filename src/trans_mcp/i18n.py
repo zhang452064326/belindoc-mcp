@@ -115,6 +115,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "上传的文件已失效（30014）。预签名地址有时效，过期之后那份文件就取不到了。",
         "error.biz.404": "接口 {path} 在当前服务地址（{base}）上不存在。这不是网络故障，也不是服务器维护：该功能在这个环境没有部署，或者路径已经变了。",
         "error.biz.transient": "翻译服务暂时不可用（{code}）：上游正忙或并发任务已满，这不是参数错，也和上传无关。",
+        "download.doc.layouts.pdf": "这份 PDF 除了纯译文，还可以下载两种双语对照版：左右对照（原文和译文并排）、上下对照（原文在上、译文在下）。",
+        "download.doc.layouts.epub": "这份 EPUB 除了纯译文，还可以下载上下对照的双语版（原文在上、译文在下）；EPUB 是流式排版，没有左右并排那一种。",
     },
     "zh-Hant": {
         "status.video.0": "未開始",
@@ -205,6 +207,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "上傳的檔案已失效（30014）。預簽名網址有時效，過期之後那份檔案就取不到了。",
         "error.biz.404": "介面 {path} 在目前服務位址（{base}）上不存在。這不是網路故障，也不是伺服器維護：該功能在這個環境沒有部署，或路徑已經變了。",
         "error.biz.transient": "翻譯服務暫時不可用（{code}）：上游正忙或並發任務已滿，這不是參數錯，也和上傳無關。",
+        "download.doc.layouts.pdf": "這份 PDF 除了純譯文，還可以下載兩種雙語對照版：左右對照（原文和譯文並排）、上下對照（原文在上、譯文在下）。",
+        "download.doc.layouts.epub": "這份 EPUB 除了純譯文，還可以下載上下對照的雙語版（原文在上、譯文在下）；EPUB 是流式排版，沒有左右並排那一種。",
     },
     "en": {
         "status.video.0": "Not started",
@@ -295,6 +299,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "The uploaded file is no longer available (30014). Presigned URLs are time-limited, and once one expires that upload can no longer be read.",
         "error.biz.404": "The endpoint {path} does not exist at the current service address ({base}). This is not a network failure or maintenance: the feature is not deployed in this environment, or the path has changed.",
         "error.biz.transient": "The translation service is temporarily unavailable ({code}): the upstream is busy or the concurrent-job slots are full. This is not a parameter error and has nothing to do with the upload.",
+        "download.doc.layouts.pdf": "Besides the translation-only file, this PDF is also available in two bilingual layouts: side-by-side (source and translation in parallel columns) and stacked (source above, translation below).",
+        "download.doc.layouts.epub": "Besides the translation-only file, this EPUB is also available stacked bilingually (source above, translation below). EPUB reflows, so there is no side-by-side layout.",
     },
     "ja": {
         "status.video.0": "未開始",
@@ -385,6 +391,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "アップロード済みのファイルが失効しました（30014）。署名付き URL には有効期限があり、切れるとそのファイルは取得できません。",
         "error.biz.404": "エンドポイント {path} は現在のサービスアドレス（{base}）に存在しません。ネットワーク障害でもメンテナンスでもなく、この環境に該当機能が配置されていないか、パスが変更されています。",
         "error.biz.transient": "翻訳サービスが一時的に利用できません（{code}）。上流が混雑しているか同時実行枠が埋まっています。パラメータの誤りでもアップロードの問題でもありません。",
+        "download.doc.layouts.pdf": "この PDF は訳文のみのファイルに加えて、対訳版も 2 種類ダウンロードできます：左右対照（原文と訳文を横に並べる）と上下対照（原文が上、訳文が下）。",
+        "download.doc.layouts.epub": "この EPUB は訳文のみのファイルに加えて、上下対照の対訳版もダウンロードできます（原文が上、訳文が下）。EPUB はリフロー型のため、左右対照はありません。",
     },
     "ko": {
         "status.video.0": "시작 전",
@@ -475,6 +483,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "업로드한 파일이 만료되었습니다(30014). 사전 서명 URL은 유효 기간이 있어 만료되면 해당 파일을 읽을 수 없습니다.",
         "error.biz.404": "엔드포인트 {path}가 현재 서비스 주소({base})에 없습니다. 네트워크 장애나 점검이 아니라, 이 환경에 해당 기능이 배포되지 않았거나 경로가 바뀐 것입니다.",
         "error.biz.transient": "번역 서비스를 일시적으로 사용할 수 없습니다({code}). 상위 서비스가 혼잡하거나 동시 작업 슬롯이 가득 찼습니다. 매개변수 오류도, 업로드 문제도 아닙니다.",
+        "download.doc.layouts.pdf": "이 PDF는 번역본 외에도 두 가지 대역본을 받을 수 있습니다: 좌우 대조(원문과 번역문을 나란히)와 상하 대조(원문 위, 번역문 아래).",
+        "download.doc.layouts.epub": "이 EPUB은 번역본 외에 상하 대조 대역본을 받을 수 있습니다(원문 위, 번역문 아래). EPUB은 가변 레이아웃이라 좌우 대조는 없습니다.",
     },
     "de": {
         "status.video.0": "Nicht gestartet",
@@ -565,6 +575,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "Die hochgeladene Datei ist nicht mehr verfügbar (30014). Vorsignierte URLs sind zeitlich begrenzt; nach Ablauf lässt sich der Upload nicht mehr lesen.",
         "error.biz.404": "Der Endpunkt {path} existiert unter der aktuellen Serviceadresse ({base}) nicht. Das ist weder ein Netzwerkfehler noch Wartung: Die Funktion ist in dieser Umgebung nicht ausgerollt, oder der Pfad hat sich geändert.",
         "error.biz.transient": "Der Übersetzungsdienst ist vorübergehend nicht verfügbar ({code}): Der Anbieter ist ausgelastet oder die Slots für parallele Aufträge sind belegt. Kein Parameterfehler und kein Upload-Problem.",
+        "download.doc.layouts.pdf": "Neben der reinen Übersetzung gibt es dieses PDF auch in zwei zweisprachigen Layouts: nebeneinander (Original und Übersetzung in parallelen Spalten) und untereinander (Original oben, Übersetzung darunter).",
+        "download.doc.layouts.epub": "Neben der reinen Übersetzung gibt es dieses EPUB auch zweisprachig untereinander (Original oben, Übersetzung darunter). EPUB fließt um, daher gibt es kein Nebeneinander-Layout.",
     },
     "fr": {
         "status.video.0": "Non démarré",
@@ -655,6 +667,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "Le fichier envoyé n'est plus disponible (30014). Les URL présignées sont limitées dans le temps : une fois expirées, l'envoi n'est plus lisible.",
         "error.biz.404": "Le point d'accès {path} n'existe pas à l'adresse de service actuelle ({base}). Ce n'est ni une panne réseau ni une maintenance : la fonctionnalité n'est pas déployée dans cet environnement, ou le chemin a changé.",
         "error.biz.transient": "Le service de traduction est temporairement indisponible ({code}) : le service amont est occupé ou les créneaux de tâches simultanées sont pleins. Ce n'est ni une erreur de paramètre ni un problème d'envoi.",
+        "download.doc.layouts.pdf": "Outre le fichier traduit seul, ce PDF est aussi disponible en deux mises en page bilingues : côte à côte (source et traduction en colonnes parallèles) et superposée (source au-dessus, traduction en dessous).",
+        "download.doc.layouts.epub": "Outre le fichier traduit seul, cet EPUB est aussi disponible en bilingue superposé (source au-dessus, traduction en dessous). L'EPUB étant à flux dynamique, il n'y a pas de mise en page côte à côte.",
     },
     "ru": {
         "status.video.0": "Не начато",
@@ -745,6 +759,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "Загруженный файл больше недоступен (30014). Предподписанные ссылки ограничены по времени: после истечения срока файл прочитать нельзя.",
         "error.biz.404": "Эндпоинт {path} отсутствует по текущему адресу сервиса ({base}). Это не сбой сети и не техработы: функция не развёрнута в этой среде либо путь изменился.",
         "error.biz.transient": "Служба перевода временно недоступна ({code}): сервис занят или исчерпаны слоты параллельных задач. Это не ошибка параметров и не проблема загрузки.",
+        "download.doc.layouts.pdf": "Кроме файла только с переводом, этот PDF доступен в двух двуязычных вариантах: рядом (оригинал и перевод в параллельных колонках) и друг под другом (оригинал сверху, перевод снизу).",
+        "download.doc.layouts.epub": "Кроме файла только с переводом, этот EPUB доступен в двуязычном варианте друг под другом (оригинал сверху, перевод снизу). EPUB имеет перетекающую вёрстку, поэтому варианта «рядом» нет.",
     },
     "ar": {
         "status.video.0": "لم يبدأ",
@@ -835,6 +851,8 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.30014": "الملف المرفوع لم يعد متاحًا (30014). الروابط الموقَّعة مؤقتة، وبعد انتهاء صلاحيتها لا يمكن قراءة الملف.",
         "error.biz.404": "المسار {path} غير موجود على عنوان الخدمة الحالي ({base}). ليست مشكلة شبكة ولا صيانة: الميزة غير منشورة في هذه البيئة أو تغيّر المسار.",
         "error.biz.transient": "خدمة الترجمة غير متاحة مؤقتًا ({code}): الخدمة مشغولة أو امتلأت خانات المهام المتزامنة. ليست خطأ في المعامِلات ولا مشكلة في الرفع.",
+        "download.doc.layouts.pdf": "إضافةً إلى ملف الترجمة وحده، يتوفر هذا الملف بصيغتين ثنائيتي اللغة: جنبًا إلى جنب (الأصل والترجمة في عمودين متوازيين) وفوق بعضهما (الأصل أعلى والترجمة أسفل).",
+        "download.doc.layouts.epub": "إضافةً إلى ملف الترجمة وحده، يتوفر هذا الملف بصيغة ثنائية اللغة فوق بعضها (الأصل أعلى والترجمة أسفل). وبما أن EPUB تنسيق متدفق، فلا يوجد تخطيط جنبًا إلى جنب.",
     },
 }
 
