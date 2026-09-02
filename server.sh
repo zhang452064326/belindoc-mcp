@@ -64,7 +64,7 @@ case "$1" in
         sleep 1
         if is_running; then
             echo "服务器已在后台启动 (日志: $LOG)"
-            echo "MCP 端点: http://localhost:$PORT/mcp"
+            echo "MCP 端点: http://localhost:$PORT${MCP_PATH:-/mcp}"
         else
             echo -e "${RED}启动失败，最后几行日志:${NC}"
             tail -n 20 "$LOG"

@@ -23,10 +23,17 @@ from .tools import TOOLS, build_tool_handlers, _to_json
 class TransMcpHttpServer:
     """HTTP 模式的 MCP Server"""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8080, mcp_path: str = "/mcp"):
         self.host = host
         self.port = port
+        # 同域名下落地页可能已占用 /mcp，允许把服务端点挪到别的路径
+        self.mcp_path = self._normalize_path(mcp_path)
         self.server = Server("trans-mcp")
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """把 'api/mcp'、'/api/mcp/' 之类的写法统一成 '/api/mcp'"""
+        return '/' + path.strip().strip('/')
     
     # upload_file 由服务端 open() 客户端给的路径，只在 stdio 模式（同机）成立。
     # HTTP 模式的客户端不在本机，且可能经隧道/反代接入，来源地址不可信，
@@ -321,13 +328,13 @@ class TransMcpHttpServer:
         app = web.Application()
         app.router.add_get('/sse', self.handle_sse)
         app.router.add_post('/message', self.handle_message)
-        app.router.add_post('/mcp', self.handle_mcp)  # Streamable HTTP 端点
+        app.router.add_post(self.mcp_path, self.handle_mcp)  # Streamable HTTP 端点
         app.router.add_get('/health', self.handle_health)
         
         print(f"Trans MCP Server (HTTP) starting on {self.host}:{self.port}", file=sys.stderr)
         print(f"SSE endpoint: http://{self.host}:{self.port}/sse", file=sys.stderr)
         print(f"Message endpoint: http://{self.host}:{self.port}/message", file=sys.stderr)
-        print(f"MCP endpoint: http://{self.host}:{self.port}/mcp", file=sys.stderr)
+        print(f"MCP endpoint: http://{self.host}:{self.port}{self.mcp_path}", file=sys.stderr)
         
         web.run_app(app, host=self.host, port=self.port)
 
@@ -336,8 +343,9 @@ def main():
     """启动 HTTP MCP Server"""
     host = os.environ.get("MCP_HOST", "0.0.0.0")
     port = int(os.environ.get("MCP_PORT", "8080"))
+    path = os.environ.get("MCP_PATH", "/mcp")
     
-    server = TransMcpHttpServer(host, port)
+    server = TransMcpHttpServer(host, port, path)
     server.run()
 
 

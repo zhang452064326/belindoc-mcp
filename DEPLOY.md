@@ -123,6 +123,19 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 
 ---
 
+## 端点路径
+
+服务端点默认是 `/mcp`。如果同域名下落地页已经占用了 `/mcp`，用 `MCP_PATH` 挪开：
+
+```bash
+MCP_PATH=/api/mcp ./server.sh start
+```
+
+客户端 URL 相应改成 `http://YOUR_SERVER_IP:8080/api/mcp`。
+更省事的做法是把服务放到独立子域名（如 `mcp.example.com/mcp`），不用改任何配置。
+
+---
+
 ## 服务器管理
 
 ```bash
