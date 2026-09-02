@@ -66,17 +66,42 @@ async def test_get_language_enum_display_locale(client):
 
 
 @pytest.mark.asyncio
-async def test_get_quota(client):
-    """测试查询配额"""
-    mock_response = MagicMock()
-    mock_response.json.return_value = {
-        "code": 0,
-        "data": {"quota": 1000}
-    }
-    mock_response.raise_for_status = MagicMock()
-    
-    client.client.get = AsyncMock(return_value=mock_response)
-    
-    result = await client.get_quota()
-    client.client.get.assert_awaited_once()
-    assert result["code"] == 0
+async def test_account_snapshot_merges_wallet_and_subscription(client):
+    """额度要自己算：上游给的是「免费额度用了多少 / 一共多少」，不是余额"""
+    from trans_mcp.client import _ACCOUNTS
+
+    _ACCOUNTS.clear()
+
+    async def fake_post(path, payload):
+        if path.endswith("getMyWalletInfo"):
+            return {"code": "200", "data": {
+                "translateQuota": 120, "useFreeTranslateQuota": 6,
+                "totalFreeTranslateQuota": 10, "ocrTranslateQuota": 0,
+            }}
+        return {"code": "200", "data": {
+            "vipName": "pro", "vipType": 10, "endTime": 1788340732000,
+            "videoDurationLimit": 60, "videoTranslateConcurrency": 2,
+        }}
+
+    client._post = fake_post
+    snapshot = await client.account_snapshot()
+    assert snapshot["ok"] is True
+    assert snapshot["quota"]["freeLeft"] == 4          # 10 - 6
+    assert snapshot["quota"]["available"] == 124       # 免费剩余 + 钱包
+    assert snapshot["limits"]["videoDurationMinutes"] == 60
+
+
+@pytest.mark.asyncio
+async def test_account_snapshot_degrades_when_endpoint_missing(client):
+    """老版本服务端没有 /external/user：查不到就放行，不能把提交拦下来"""
+    from trans_mcp.client import _ACCOUNTS, video_duration_over_limit
+
+    _ACCOUNTS.clear()
+
+    async def fake_post(path, payload):
+        return {"code": "404", "msg": "接口不存在"}
+
+    client._post = fake_post
+    snapshot = await client.account_snapshot()
+    assert snapshot["ok"] is False
+    assert video_duration_over_limit(99 * 60 * 1000, snapshot) is None

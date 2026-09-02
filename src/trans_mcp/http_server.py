@@ -35,22 +35,11 @@ class TransMcpHttpServer:
         """把 'api/mcp'、'/api/mcp/' 之类的写法统一成 '/api/mcp'"""
         return '/' + path.strip().strip('/')
     
-    # upload_file 由服务端 open() 客户端给的路径，download_video_result 反过来
-    # 由服务端往那条路径写文件——两者都只在服务端与用户同机时成立，否则「下载到
-    # 本地」落的是服务器的盘，还等于给了任意路径的写入面。
-    # 靠 remote addr 判断不住：经隧道或反代进来的请求一样是 loopback。所以默认
-    # 全部隐藏，只在部署者显式声明同机时才放出来——比如就监听 localhost 给本机的
-    # MCP 客户端用，这时设 MCP_LOCAL_FS=1。
-    LOCAL_FS_TOOLS = {
-        'upload_file', 'get_upload_status',
-        'download_video_result', 'get_download_status',
-    }
-    LOCAL_FS = os.getenv('MCP_LOCAL_FS', '').strip().lower() in ('1', 'true', 'yes', 'on')
-    HTTP_HIDDEN_TOOLS = set() if LOCAL_FS else LOCAL_FS_TOOLS
-    
     @classmethod
     def _visible_tools(cls, request):
-        return [t for t in TOOLS if t.name not in cls.HTTP_HIDDEN_TOOLS]
+        # 服务端不碰用户机器上的文件：上传由调用方跑 uploadCommand，下载给签名链接。
+        # 所以没有「本机文件工具」这一类，工具列表对谁都一样。
+        return list(TOOLS)
     
     @staticmethod
     def _get_api_key(request):
@@ -114,7 +103,7 @@ class TransMcpHttpServer:
         if not self._get_api_key(request):
             return web.Response(status=401, text='Unauthorized: 缺少 Authorization: Bearer <key>')
         
-        tool_handlers = self._build_tool_handlers(TranslationClient(self._get_api_key(request), local_fs=self.LOCAL_FS))
+        tool_handlers = self._build_tool_handlers(TranslationClient(self._get_api_key(request)))
         
         try:
             body = await request.json()
@@ -143,21 +132,6 @@ class TransMcpHttpServer:
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
                 
-                if tool_name in self.HTTP_HIDDEN_TOOLS:
-                    return web.json_response({
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "result": {"content": [{"type": "text", "text": _to_json({
-                            "code": "400",
-                            "msg": (
-                                f"{tool_name} 要读写服务端本机的路径，本次部署没有开放"
-                                "（已从工具列表中隐藏，服务端与客户端可能不在同一台机器上）。"
-                                "上传请改用 upload_document 取预签名链接并原样执行其 uploadCommand；"
-                                "下载请把返回里的签名链接原样完整交给用户。"
-                                "若服务端确实与用户同机，部署者可以设 MCP_LOCAL_FS=1 后重启放开。"
-                            ),
-                        })}]}
-                    })
                 
                 if tool_name in tool_handlers:
                     try:
@@ -211,7 +185,7 @@ class TransMcpHttpServer:
             }, status=401)
         
         # 创建翻译客户端（按请求绑定 API Key）
-        tool_handlers = self._build_tool_handlers(TranslationClient(api_key, local_fs=self.LOCAL_FS))
+        tool_handlers = self._build_tool_handlers(TranslationClient(api_key))
         try:
             body = await request.json()
             method = body.get("method")
@@ -293,21 +267,6 @@ class TransMcpHttpServer:
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
                 
-                if tool_name in self.HTTP_HIDDEN_TOOLS:
-                    return web.json_response({
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "result": {"content": [{"type": "text", "text": _to_json({
-                            "code": "400",
-                            "msg": (
-                                f"{tool_name} 要读写服务端本机的路径，本次部署没有开放"
-                                "（已从工具列表中隐藏，服务端与客户端可能不在同一台机器上）。"
-                                "上传请改用 upload_document 取预签名链接并原样执行其 uploadCommand；"
-                                "下载请把返回里的签名链接原样完整交给用户。"
-                                "若服务端确实与用户同机，部署者可以设 MCP_LOCAL_FS=1 后重启放开。"
-                            ),
-                        })}]}
-                    })
                 
                 if tool_name in tool_handlers:
                     try:
@@ -358,11 +317,6 @@ class TransMcpHttpServer:
         print(f"SSE endpoint: http://{self.host}:{self.port}/sse", file=sys.stderr)
         print(f"Message endpoint: http://{self.host}:{self.port}/message", file=sys.stderr)
         print(f"MCP endpoint: http://{self.host}:{self.port}{self.mcp_path}", file=sys.stderr)
-        print(
-            "本机文件工具（" + "、".join(sorted(self.LOCAL_FS_TOOLS)) + "）："
-            + ("已开放（MCP_LOCAL_FS=1）" if self.LOCAL_FS else "已隐藏，同机部署可设 MCP_LOCAL_FS=1 放开"),
-            file=sys.stderr,
-        )
         
         web.run_app(app, host=self.host, port=self.port)
 

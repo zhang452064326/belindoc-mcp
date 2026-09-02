@@ -1,12 +1,20 @@
 """API 客户端"""
 
+import asyncio
+import calendar
 import json
+import math
 import os
 import re
+import hashlib
+import secrets
 import sys
 import time
 import httpx
 from typing import Optional
+
+# 用户可见的产出串走消息表（九种语言），给模型看的指令仍是中文
+from .i18n import t
 
 # 测试环境
 API_BASE_URL = "http://internal-test-host:6101"
@@ -17,7 +25,57 @@ DOC_PREFIX = "/external/translate"
 #   600   System is busy
 #   30010 并发任务超过限制，等在跑的任务完成后重试
 #   30012 任务重复提交，稍后重试
-TRANSIENT_CODES = {"600", "30010", "30012"}
+#   30311 调用过于频繁，退避后重试
+TRANSIENT_CODES = {"600", "30010", "30012", "30311"}
+# 密钥层面的失败同样是 HTTP 200，业务码在响应体里（文档「错误码」一节）。原来
+# 这几个码一路原样透传，调用方看到的只是一句上游的 msg，于是把「密钥过期」当成
+# 网络故障反复重发、或者改个参数再试一遍——这几条重试一万次也不会变。
+# 分支一律认 code：msg 会随 language 头变语种，拿它做判断迟早误判。
+KEY_ERROR_CODES = {
+    "30306": "error.key.30306",   # 无效的 API 密钥
+    "30307": "error.key.30307",   # 密钥已被禁用
+    "30308": "error.key.30308",   # 密钥已过期
+    "30309": "error.key.30309",   # 调用 IP 不在白名单内
+    "30311": "error.key.30311",   # 调用过于频繁
+    "30312": "error.key.30312",   # 密钥被管理员封禁
+}
+# 这一条是限流，退避后重试有意义；其余五条重试没有意义
+KEY_ERROR_RETRYABLE = {"30311"}
+
+# 业务错误码（文档两张表的并集）。分档的意义在于「下一步该干什么」完全不同：
+# 充额度 / 换文件 / 重新上传 / 退避重试 / 等任务跑完 / 核对单号。原来这些一路
+# 原样透传，调用方拿到的只是一句上游 msg，最常见的收场是改个参数再提一次——
+# 而额度不足、格式不支持这些，提一万次也是同样的结果，每次还要重走一遍上传。
+_CODE_ACTIONS = {
+    "user": "——这要用户去处理，重试、换参数都不会变。请把上面这句原样告诉用户，"
+            "问过他之后再决定下一步，不要自己重提。",
+    "file": "——换文件之前重提没有意义。请把上面这句原样告诉用户，由他决定换一个文件"
+            "还是调整这一个，不要自己改参数重试。",
+    "reupload": "——重试提交没有用：必须重新调 upload_document / upload_video 取预签名地址、"
+                "把文件重新传上去，再用新的 objectKey 提交。",
+    "retry": "——这是瞬时故障，退避几秒后用相同参数重试即可，文件不用重新上传。",
+    "wait": "——这不是错误，是任务还没到终态。请先用状态查询工具确认，等完成之后再来取。",
+    "check": "——请核对订单号是不是当前账号的，重试同一个单号不会有别的结果。",
+    "task": "——重新提交是一单新任务、会再扣一次费。请先把这句如实告诉用户，"
+            "问过之后再决定要不要重做，不要自己直接重提。",
+}
+BUSINESS_ERROR_CODES = {
+    "30002": "file",      # 不支持的文件类型
+    "30003": "file",      # 视频文件类型不支持
+    "30006": "user",      # 翻译额度不足
+    "30013": "user",      # OCR 额度不足
+    "31001": "file",      # 视频文件为空
+    "31002": "file",      # 视频文件大小超出限制
+    "31004": "reupload",  # 视频文件上传失败（这个 key 底下没文件）
+    "30014": "reupload",  # 上传文件已失效（文档侧）
+    "31005": "reupload",  # 视频文件已失效
+    "31006": "task",      # 语音识别失败
+    "31007": "retry",     # 任务提交失败
+    "31008": "wait",      # 文件翻译中
+    "31009": "file",      # 视频时长超出限制
+    "31010": "user",      # 免费用户每月 10 分钟
+    "403": "check",       # 无访问权限
+}
 # 需要重新上传、重试提交没用的错误码
 REUPLOAD_CODES = {"30014": "上传的文件已失效，需要重新获取预签名地址并上传"}
 # 任务状态，见文档 5.2。注意 1=解析中：漏了它会把正常的中间态当成未知状态。
@@ -55,6 +113,9 @@ URL_TYPE_FIELDS = {
     4: ("yComparisonS3Url", None),
 }
 VIDEO_PREFIX = "/external/videoTranslate"
+# 账户信息（钱包额度 / 订阅权益）。上游 2026-09-02 才开放到 /external，
+# 在此之前 MCP 里那个 getQuota 是个从来没存在过的接口。
+USER_PREFIX = "/external/user"
 # 视频任务状态。和文档翻译完全不是一套：这里 2 是「成功」，而文档翻译里
 # 2 是「翻译中」、3 才是完成。照搬会把成功读成进行中。
 VIDEO_STATUS_TEXT = {
@@ -85,6 +146,38 @@ VIDEO_SUBTITLE_TYPE = {
 }
 # 视频时长按 30 秒一个计费单位向上取整，每单位 4 额度
 VIDEO_QUOTA_UNIT_MS = 30_000
+VIDEO_QUOTA_PER_UNIT = 4
+
+# 配音 × 字幕 的可选组合。这两项决定这次翻译到底做出什么东西，也决定扣多少，
+# 所以要摆成一张表让用户挑，而不是模型自己定一组、只问「提交还是放弃」。
+# ("No", 0) 不列：既不配音也不嵌字幕，产出和原片没区别，但一样扣费。
+VIDEO_COMBOS = (
+    ("No", 1),
+    ("No", 3),
+    ("No", 2),
+    ("clone", 1),
+    ("clone", 3),
+    ("clone", 2),
+    ("clone", 0),
+)
+VIDEO_COMBO_LABEL = {
+    ("No", 1): "原声 + 译文字幕",
+    ("No", 3): "原声 + 双语字幕",
+    ("No", 2): "原声 + 原文字幕",
+    ("clone", 1): "克隆配音 + 译文字幕",
+    ("clone", 3): "克隆配音 + 双语字幕",
+    ("clone", 2): "克隆配音 + 原文字幕",
+    ("clone", 0): "克隆配音 + 不嵌字幕（只换声音）",
+}
+
+
+def quota_by_rule(duration_ms: float, voice_role: str, subtitle_type: int) -> int:
+    """按文档写死的计费规则推一个额度。只在上游试算问不到时兜底，用了要标出来。"""
+    units = max(1, math.ceil((duration_ms or 0) / VIDEO_QUOTA_UNIT_MS))
+    quota = units * VIDEO_QUOTA_PER_UNIT
+    if voice_role == "clone" and subtitle_type != 0:
+        quota *= 2
+    return quota
 
 
 # videoTaskParam 的字段。后端把整个对象序列化存库，再原样反序列化成
@@ -125,18 +218,88 @@ def _check_video_task(param: dict) -> Optional[str]:
     return None
 
 
+def annotate_error(result):
+    """把上游的业务码翻成「这是什么 + 下一步干什么」
+
+    含义按 locale 给用户看（要去充额度、换文件、改控制台的是他），后面那句
+    「别重试 / 该重传」是给模型的，留中文。
+    分支一律认 code：msg 会随 language 头变语种，拿它做判断迟早误判。
+    """
+    if not isinstance(result, dict):
+        return result
+    code = str(result.get("code") or "")
+
+    if code in KEY_ERROR_CODES:
+        retryable = code in KEY_ERROR_RETRYABLE
+        result["msg"] = t(KEY_ERROR_CODES[code]) + (
+            "——这是限流，不是参数错。退避几秒再调一次即可，别改参数、别重新上传文件。"
+            if retryable else
+            "——这是密钥本身的问题：重试、换参数、重新上传都没有用。请把上面这句话"
+            "原样告诉用户（这是他去控制台能处理的事），然后停下来，不要再调别的工具。"
+        )
+        result["keyError"] = True
+        result["retryable"] = retryable
+        return result
+
+    if code in BUSINESS_ERROR_CODES:
+        action = BUSINESS_ERROR_CODES[code]
+        result["msg"] = t(f"error.biz.{code}") + _CODE_ACTIONS[action]
+        result["errorAction"] = action
+        result["retryable"] = action == "retry"
+    return result
+
+
+# 老名字：早先只处理密钥那六个码，留个别名免得漏改
+annotate_key_error = annotate_error
+
+
 def _not_found(path: str) -> dict:
     """404 的可读说明。上游对未部署的接口直接回 404，httpx 抛的是一句英文
     HTTPStatusError，调用方会当成网络故障反复重试、或告诉用户「服务器维护中」。"""
     return {
         "code": "404",
         "msg": (
-            f"接口 {path} 在当前服务地址（{API_BASE_URL}）上不存在。"
-            "这不是网络故障，也不是服务器维护，重试没有意义："
-            "该功能在这个环境未部署，或路径已变更。请把这句话告诉用户，"
-            "不要反复重试，也不要改用其他工具凑合。"
+            t("error.biz.404", path=path, base=API_BASE_URL)
+            + "——重试没有意义。请把上面这句原样告诉用户，不要反复重试，"
+              "也不要改用其他工具凑合。"
         ),
     }
+
+
+def video_combo_label(voice_role: str, subtitle_type) -> str:
+    """确认菜单里那一格的名字。VIDEO_COMBO_LABEL 留作中文原文，对外按 locale 拼——
+    这张菜单是用户拿来做决定的，比任何一句进度都更该说他的语言。"""
+    voice = t("combo.voice.clone" if voice_role == "clone" else "combo.voice.no")
+    key = f"combo.subtitle.{subtitle_type}"
+    subtitle = t(key)
+    if subtitle == key:
+        return f"{voice_role}/{subtitle_type}"
+    return t("combo.label", voice=voice, subtitle=subtitle)
+
+
+def video_status_text(status) -> str:
+    """视频任务状态，按调用方要求的语言给。上面那几张 dict 常量留作中文原文
+    （内部对照、注释里引用），对外一律走消息表。"""
+    key = f"status.video.{status}"
+    text = t(key)
+    return t("status.unknown", value=status) if text == key else text
+
+
+def video_step_text(step) -> str:
+    key = f"status.step.{step}"
+    text = t(key)
+    return t("status.unknown", value=step) if text == key else text
+
+
+def video_step_status_text(value) -> str:
+    # 步骤状态只有「完成」这一档和任务状态的说法不同，其余复用
+    return t("status.step.done") if value == 2 else video_status_text(value)
+
+
+def doc_status_text(status) -> str:
+    key = f"status.doc.{status}"
+    text = t(key)
+    return t("status.unknown", value=status) if text == key else text
 
 
 def _annotate_video_status(record: dict) -> dict:
@@ -144,14 +307,17 @@ def _annotate_video_status(record: dict) -> dict:
     if not isinstance(record, dict):
         return record
     if "status" in record:
-        record["statusText"] = VIDEO_STATUS_TEXT.get(record["status"], f"未知({record['status']})")
+        record["statusText"] = video_status_text(record["status"])
     if record.get("step") is not None:
-        record["stepText"] = VIDEO_STEP_TEXT.get(record["step"], f"未知({record['step']})")
+        record["stepText"] = video_step_text(record["step"])
     if record.get("stepStatus") is not None:
-        record["stepStatusText"] = VIDEO_STEP_STATUS_TEXT.get(
-            record["stepStatus"], f"未知({record['stepStatus']})"
-        )
+        record["stepStatusText"] = video_step_status_text(record["stepStatus"])
     note = _output_note(record)
+    rewrite = record.get("videoTranslateRewrite")
+    if isinstance(rewrite, dict) and rewrite.get("status") == VIDEO_STATUS_DONE:
+        # 改写有自己的一份 paramJson（字幕样式可能被改过），有就用它的
+        note = _output_note(rewrite) or note
+        note = (note + t("video.note_join") if note else "") + t("video.rewritten")
     if note:
         record["outputNote"] = note
     return record
@@ -168,9 +334,107 @@ def _output_note(record: dict) -> str:
     voice = param.get("voiceRole")
     if voice is None:
         return ""
-    voice_text = "未配音（保留原声）" if voice == "No" else f"已配音（{voice}）"
-    subtitle_text = VIDEO_SUBTITLE_TEXT.get(param.get("subtitleType"), "字幕设置未知")
-    return f"{voice_text}，{subtitle_text}"
+    voice_text = t("video.voice.none") if voice == "No" else t("video.voice.clone", voice=voice)
+    subtitle_key = f"video.subtitle.{param.get('subtitleType')}"
+    subtitle_text = t(subtitle_key)
+    if subtitle_text == subtitle_key:
+        subtitle_text = t("video.subtitle.unknown")
+    return t("video.output_note", voice=voice_text, subtitle=subtitle_text)
+
+
+# 详情 / 列表 / 提交回执这类只读接口原样透传上游记录：一条二十多个字段，十几个
+# 是 null，末尾还挂着几条几百字符的签名地址，pageSize=10 的列表一次上万字符。
+# 真正要看的就下面这些，其余是噪声。地址一律不带：要交付走
+# get_video_translation_status，它现查现签，比列表里那条随时会过期的旧地址靠谱。
+_VIDEO_RECORD_KEEP = (
+    "videoTranslateOrderNo",
+    "videoFileName",
+    "status",
+    "statusText",
+    "step",
+    "stepText",
+    "stepStatusText",
+    "outputNote",
+    "sourceLanguage",
+    "targetLanguage",
+    "videoDuration",
+    "freeTranslateQuota",
+    "walletTranslateQuota",
+    "progress",
+    "errorMessage",
+    "createTime",
+    "startTime",
+    "endTime",
+)
+
+
+def slim_video_record(record, urls: tuple = ()) -> dict:
+    """按白名单裁掉视频记录里的 id、objectKey、paramJson 和签名地址
+
+    paramJson 里唯一有用的信息（有没有配音、嵌了什么字幕）已经由
+    _annotate_video_status 提炼成 outputNote，原文没必要再占一份。
+    """
+    if not isinstance(record, dict):
+        return record
+    # 顺手滤掉 null：刚提交的任务有一半字段是空的，留着只是占地方
+    slim = {k: record[k] for k in _VIDEO_RECORD_KEEP if record.get(k) is not None}
+    rewrite = record.get("videoTranslateRewrite")
+    if isinstance(rewrite, dict) and rewrite.get("videoTranslateRewriteOrderNo"):
+        # 只留摘要：有没有改写、改写成没成功。地址由 video_products 统一挑，
+        # 不在这里再甩一遍几百字符的签名链接。
+        slim["rewrite"] = {
+            "orderNo": rewrite.get("videoTranslateRewriteOrderNo"),
+            "status": rewrite.get("status"),
+            "statusText": video_status_text(rewrite.get("status")),
+        }
+    for key in urls:
+        if record.get(key):
+            slim[key] = record[key]
+    return slim
+
+
+def strip_long_urls(record: dict) -> tuple:
+    """摘掉记录里的长签名地址，只留字段名。文档侧记录的字段名没有视频那边稳定，
+    不敢上白名单，就只砍最占地方的那部分——一条对照版式地址就是四五百字符，
+    而它们几乎总是转手就废：真要下载得走 get_document_translation_result，
+    那里才有水印控制，直接用详情里的地址反而会拿到带水印的版本。"""
+    if not isinstance(record, dict):
+        return record, []
+    kept, dropped = {}, []
+    for key, value in record.items():
+        if isinstance(value, str) and len(value) > 120 and "://" in value:
+            dropped.append(key)
+            continue
+        kept[key] = value
+    return kept, dropped
+
+
+def video_products(data: dict) -> tuple:
+    """任务当前的产物地址，以及它是不是字幕改写后的那一版
+
+    做过字幕改写并且改写成功之后，新视频和新字幕在 videoTranslateRewrite 这个
+    子记录里，父记录的 targetFileObjectKey 不会更新——服务端
+    VideoTranslateRewriteServiceImpl 另存了一份 entity。只读顶层就会把改写前那份
+    当成最终产物交出去：用户刚花额度把字幕校对完、重新生成，拿到的还是旧的，
+    而且从返回里看不出来。
+    """
+    urls = {
+        field: data.get(field)
+        for field in (
+            "targetFileUrl", "targetSubtitlesUrl",
+            "sourceSubtitlesUrl", "sourceFileUrl",
+        )
+    }
+    rewrite = data.get("videoTranslateRewrite")
+    if not isinstance(rewrite, dict) or rewrite.get("status") != VIDEO_STATUS_DONE:
+        return urls, {}
+    for field in ("targetFileUrl", "targetSubtitlesUrl"):
+        if rewrite.get(field):
+            urls[field] = rewrite[field]
+    return urls, {
+        "rewritten": True,
+        "rewriteOrderNo": rewrite.get("videoTranslateRewriteOrderNo"),
+    }
 
 
 def _available_variants(data: dict) -> dict:
@@ -185,9 +449,7 @@ def _available_variants(data: dict) -> dict:
 # 全挂在问号后面。实测把 ? 之后截掉会直接 403 MissingKey。转述时顺手把长链接
 # 截短是很自然的动作，所以每条返回都得把这句话摆在明面上。
 _URL_VERBATIM_NOTE = (
-    "链接请原样完整交给用户：问号后面的签名参数（Signature、Key-Pair-Id、"
-    "expires、sign 等）一个字符都不能删、不能截断、不能改写，也不要为了好看"
-    "缩短它，否则会 403 MissingKey。"
+    "链接原样完整给出：问号后的签名参数一个字符都不能删改或缩短，否则 403 MissingKey。"
 )
 
 
@@ -200,6 +462,46 @@ def _url_expiry(url: str):
     if not match:
         return None
     return max(0, int(match.group(1)) - time.time())
+
+
+def _sigv4_expiry(url: str):
+    """S3 预签名 PUT 的剩余有效期（秒）
+
+    SigV4 把过期写成 X-Amz-Date + X-Amz-Expires 两段，和 CloudFront 的
+    Expires=<epoch> 不是一套——_url_expiry 的正则也匹配不到它（前面隔着
+    X-Amz-）。解析不出来返回 None。
+    """
+    if not url:
+        return None
+    issued_at = re.search(r"[?&]X-Amz-Date=(\d{8}T\d{6}Z)", url)
+    ttl = re.search(r"[?&]X-Amz-Expires=(\d+)", url)
+    if not (issued_at and ttl):
+        return None
+    try:
+        issued = calendar.timegm(time.strptime(issued_at.group(1), "%Y%m%dT%H%M%SZ"))
+    except ValueError:
+        return None
+    return max(0, issued + int(ttl.group(1)) - time.time())
+
+
+def _upload_expiry_note(url: str) -> str:
+    """上传链接什么时候作废，说成绝对时刻
+
+    实测只有 10 分钟。中间去查个时长、排个网络问题就过了，拿旧链接重试只会
+    403，而模型看不到期限就会一直重试同一条、并把 403 归给「网络问题」。
+    """
+    remaining = _sigv4_expiry(url)
+    if remaining is None:
+        return "上传链接有有效期，过期后重调本工具取新的再传。"
+    if remaining <= 0:
+        return "这条上传链接已经过期了，重调本工具取新的再传。"
+    at = time.localtime(time.time() + remaining)
+    fmt = "%H:%M" if at.tm_yday == time.localtime().tm_yday else "%m-%d %H:%M"
+    return (
+        f"这条上传链接 {time.strftime(fmt, at)}（服务端本地时间）过期，"
+        f"还剩 {_format_duration(remaining)}——排查问题耗掉的时间也算在里面；"
+        "过了就别拿它重试（只会 403），重调本工具取新链接。"
+    )
 
 
 def _expires_at(url: str) -> str:
@@ -219,13 +521,12 @@ def _expiry_note(url: str) -> str:
     「约 1 小时」——实测只有 11 分钟，用户照着那个数去下载就已经过期了。"""
     remaining = _url_expiry(url)
     if remaining is None:
-        return "链接有有效期，过期后重新调用本工具取新的。"
+        return "链接有有效期，过期后重调本工具取新的。"
     if remaining <= 0:
-        return "链接已过期，请重新调用本工具取新的。"
+        return "链接已过期，请重调本工具取新的。"
     return (
-        f"链接在 {_expires_at(url)}（服务端本地时间）过期，此刻还剩 "
-        f"{_format_duration(remaining)}。请把这个时间点告诉用户，别只说「尽快下载」，"
-        "也别按经验说成一小时；过期后重新调用本工具取新的。"
+        f"{_expires_at(url)}（服务端本地时间）过期，还剩 {_format_duration(remaining)}"
+        "——把这个时间点告诉用户，别按经验说成一小时；过期后重调本工具取新链接。"
     )
 
 
@@ -250,7 +551,107 @@ def _upload_progress_log(object_key: str) -> str:
     return f"/tmp/trans-mcp-upload-{safe}.log"
 
 
-def _attach_upload_command(result: dict) -> None:
+# 认得出视频就能自动挑对预签名端点——视频和文档走的是两套端点、两个存储路径，
+# 传错了上游不报错，直到提交翻译时才说 objectKey 不对。
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".avi", ".flv", ".wmv", ".webm",
+    ".m4v", ".mpg", ".mpeg", ".ts", ".3gp",
+}
+
+
+def is_video_file(file_name: str) -> bool:
+    return os.path.splitext(file_name or "")[1].lower() in VIDEO_EXTENSIONS
+
+
+def _next_step_hint(kind: str) -> str:
+    if kind == "video":
+        return "用 objectKey 作为 source_file_object_key 调 translate_video"
+    return "用 objectKey 作为 fileObjectKey 调 translate_document"
+
+
+# 只签发了预签名链接、本服务没有见过字节落地的 objectKey。实测模型会在拿到链接后
+# 直接宣布「文件已上传」然后去提交翻译，上游回 31004「文件上传失败」——错在两步之
+# 前，光看 31004 根本读不出来。这里记一笔，好在报错时把话说准。
+_ISSUED_KEYS: dict[str, float] = {}
+_ISSUED_KEEP = 200
+
+
+def note_issued_key(object_key: str) -> None:
+    if not object_key:
+        return
+    if len(_ISSUED_KEYS) > _ISSUED_KEEP:
+        for k in list(_ISSUED_KEYS)[: len(_ISSUED_KEYS) - _ISSUED_KEEP]:
+            _ISSUED_KEYS.pop(k, None)
+    _ISSUED_KEYS[object_key] = time.time()
+
+
+# isOcr 接口要求显式传 storageType（1 私有化存储 / 2 aws / 3 oss），而这个值在
+# 预签发那一步上游就给了。记在这里，免得为了它把 storageType 塞回工具返回、
+# 让调用方去转述一个它根本不该关心的实现细节。
+_KEY_STORAGE: dict = {}
+_KEY_STORAGE_KEEP = 100
+
+
+def note_storage_type(object_key: str, storage_type) -> None:
+    if not object_key or storage_type is None:
+        return
+    _KEY_STORAGE[object_key] = storage_type
+    if len(_KEY_STORAGE) > _KEY_STORAGE_KEEP:
+        for key in list(_KEY_STORAGE)[:-_KEY_STORAGE_KEEP]:
+            _KEY_STORAGE.pop(key, None)
+
+
+def storage_type_of(object_key: str) -> int:
+    """默认按 aws 算：测试与线上环境都是 2，私有化部署才是 1。
+    猜错的后果只是这一次检测失败，而检测失败是放行的，不会拦住提交。"""
+    return _KEY_STORAGE.get(object_key or "", 2)
+
+
+# 检测结果按 objectKey 记一份：上传后就检测，提交时直接取，不必为同一个文件
+# 打两趟上游（那一趟要下载并分析整个 PDF，不便宜）。
+_KEY_OCR: dict = {}
+_KEY_OCR_KEEP = 100
+
+
+def remember_ocr(object_key: str, info: dict) -> None:
+    if not object_key or not info:
+        return
+    _KEY_OCR[object_key] = info
+    if len(_KEY_OCR) > _KEY_OCR_KEEP:
+        for key in list(_KEY_OCR)[:-_KEY_OCR_KEEP]:
+            _KEY_OCR.pop(key, None)
+
+
+def ocr_of(object_key: str):
+    return _KEY_OCR.get(object_key or "")
+
+
+# 正在后台跑的检测。网页端是文件一传完就 void 掉一个请求、不阻塞用户继续填表
+# （UploadFileSection 的 axios.put.then 里），这边照做：上传返回不等它，等到
+# 提交翻译时再来收结果，那会儿多半早就回来了。
+_OCR_TASKS: dict = {}
+
+
+# 双层 PDF = 图片上盖了一层文字（多半是别处 OCR 过一遍留下的）。直接翻会翻到
+# 那层文字上，而那层往往是错字；拍平成纯图片再交给这边的 OCR 反而更准。
+DOUBLE_DECK_NOTE = (
+    "⚠️ 这是双层 PDF（扫描图上盖了一层文字，多半是别处 OCR 过留下的）。"
+    "直接翻译会翻到那层文字上，它往往是错的。建议先用 "
+    "https://belindoc.com/zh/tools/flatten-pdf 把它拍平，再重新上传翻译。"
+    "这句请原样告诉用户，把链接完整给出，由用户决定拍不拍平。"
+)
+
+
+def is_pdf(file_name: str) -> bool:
+    return (file_name or "").lower().endswith(".pdf")
+
+
+def key_never_uploaded(object_key: str) -> bool:
+    """本服务发过这个 key 的链接，但从没经手过它的字节"""
+    return (object_key or "") in _ISSUED_KEYS
+
+
+def _attach_upload_command(result: dict, kind: str = "document") -> None:
     """给预签名结果补一条可直接执行的上传命令
 
     Content-Disposition 必须与预签名时的取值逐字一致，否则 S3 返回
@@ -264,6 +665,8 @@ def _attach_upload_command(result: dict) -> None:
         if not url or not encoded:
             continue
         item["contentDisposition"] = f"attachment; filename*=UTF-8''{encoded}"
+        note_issued_key(item.get("objectKey", ""))
+        note_storage_type(item.get("objectKey", ""), item.get("storageType"))
         # --progress-bar 把进度写到 stderr，并且用 \r 原地覆盖。调用方把输出捕获成
         # 文本时，\r 会让整段进度挤成一行乱码，等于没有进度。转成 \n 之后每一档
         # 各占一行：边跑边刷的终端能实时滚动，事后翻日志也读得懂。
@@ -277,29 +680,129 @@ def _attach_upload_command(result: dict) -> None:
         )
         log_path = _upload_progress_log(item.get("objectKey", ""))
         item["uploadCommand"] = curl + " 2>&1 | tr '\\r' '\\n'"
-        item["uploadCommandBackground"] = f"( {curl} 2>&1 | tr '\\r' '\\n' > {log_path} ) &"
         item["progressLogPath"] = log_path
+        # 后台版原来是单独一个字段，等于把七百字符的签名 URL 又抄了一遍，而十次里
+        # 有九次用不上。改成在说明里给出包法，要用的时候自己套一层就是了。
         item["uploadNote"] = (
-            "上传前先 ls -lh 看一眼文件大小，把「多大、大概要传多久」先告诉用户——"
-            "多数文件几秒就传完了，用户真正难受的是不知道要等多久。"
-            "然后原样执行 uploadCommand，只替换文件路径；"
-            "Content-Disposition 一个字符都不能改，否则 S3 会报 SignatureDoesNotMatch。"
-            "命令末尾的 `2>&1 | tr` 是把 curl 的进度条摊成逐行输出，删掉就再也看不到进度了。"
-            "文件很大（超过 100MB）时改用 uploadCommandBackground 放后台传，再反复执行 "
-            f"`tail -n 3 {log_path}` 查看进度并转述给用户。"
-            "输出的「上传结果 HTTP 200」才算成功，S3 成功时 body 为空属正常。"
-            "上传成功后用本条的 objectKey 作为 fileObjectKey 调 translate_document。"
+            "原样跑 uploadCommand，只替换文件路径，Content-Disposition 一个字符都不能改"
+            "（改了 S3 报 SignatureDoesNotMatch）。PDF 传完（看到 HTTP 200）之后先调 "
+            "check_pdf_ocr（把 objectKey 传进去）问一下是不是扫描件，再去提交翻译。"
+            "超过 100MB 就把整条命令包起来放后台："
+            f"`( <uploadCommand> > {log_path} 2>&1 ) &`，再 `tail -n 3 {log_path}` 看进度。"
+            f"出现「上传结果 HTTP 200」才算成功。成功后{_next_step_hint(kind)}。"
+            + _upload_expiry_note(url)
+            # 实测：上传命令被客户端沙箱挡住（curl 无输出地挂住、nslookup 报
+            # bind: Operation not permitted），模型据此断定「用户网络受限、DNS
+            # 解析失败」，让用户去开 VPN 换机器——而用户的网络好好的，是跑命令
+            # 那一端没有联网权限。原因不明就别替用户诊断他的网络。
+            + "没出现「上传结果 HTTP 200」时先分清是哪一种，不要笼统说成「网络不通」："
+            "(a) 命令挂住、没有任何输出，或报 Operation not permitted / nice failed"
+            "——这是**跑命令的那一端**被沙箱挡了外网，不是用户的网络坏了、更不是 DNS，"
+            "请如实这么说，并以带网络权限的方式重跑同一条命令，不要建议用户开 VPN 或换机器；"
+            "(b) HTTP 403 或 SignatureDoesNotMatch——链接过期或 Content-Disposition 被改过，"
+            "重调本工具取新链接再传，别拿旧链接反复重试；"
+            "(c) 其他 HTTP 码，把那一行原样告诉用户，别自己解释成网络问题。"
         )
 
 
-# ============ 上传进度 ============
-# MCP 的 tools/call 是一问一答，上传途中没有插话的通道；HTTP 模式下还会给每个请求
-# 新建一个 TranslationClient。所以进度只能记在模块级，由 get_upload_status 轮询取回，
-# 和 wait_for_translation 是同一套「发起 + 反复查」的路子。
-_UPLOADS: dict[str, dict] = {}
-_UPLOAD_KEEP = 50
-# 还没有实测速度时用来估算耗时的保守带宽，只为给用户一个量级
-_ASSUMED_UPLOAD_BPS = 2 * 1024 * 1024
+# ============ 账户快照 ============
+# HTTP 模式下每个请求都会新建一个 TranslationClient，缓存只能挂在模块级；
+# 按 api key 的指纹分桶，别把 key 本身当字典键。
+_ACCOUNTS: dict = {}
+_ACCOUNT_TTL = 300
+_ACCOUNT_FAIL_TTL = 60
+_ACCOUNT_KEEP = 20
+
+
+def _account_key(api_key: str) -> str:
+    return hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+
+
+def _prune_accounts() -> None:
+    if len(_ACCOUNTS) <= _ACCOUNT_KEEP:
+        return
+    for key in sorted(_ACCOUNTS, key=lambda k: _ACCOUNTS[k]["at"])[:-_ACCOUNT_KEEP]:
+        _ACCOUNTS.pop(key, None)
+
+
+def _envelope_data(result) -> Optional[dict]:
+    """从上游信封里取 data，取不到（异常、非 200）返回 None"""
+    if isinstance(result, BaseException) or not isinstance(result, dict):
+        return None
+    if str(result.get("code")) not in ("200",):
+        return None
+    data = result.get("data")
+    return data if isinstance(data, dict) else None
+
+
+def _epoch_day(value) -> str:
+    """上游的时间戳是毫秒 epoch"""
+    try:
+        return time.strftime("%Y-%m-%d", time.localtime(float(value) / 1000))
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def _build_account_snapshot(wallet_result, sub_result) -> dict:
+    """把钱包和订阅两份响应压成一屏能读完的样子
+
+    免费额度是「用了多少 / 总共多少」两个数，得自己减；钱包额度才是余额本身。
+    两个都拿不到就 ok=False，绝不拿半份数据去做限额判断。
+    """
+    wallet = _envelope_data(wallet_result)
+    sub = _envelope_data(sub_result)
+    if wallet is None and sub is None:
+        reason = ""
+        for result in (wallet_result, sub_result):
+            if isinstance(result, BaseException):
+                reason = f"{type(result).__name__}: {result}"
+                break
+            if isinstance(result, dict) and result.get("msg"):
+                reason = str(result.get("msg"))
+                break
+        return {"ok": False, "error": reason or "上游没有返回账户信息"}
+
+    snapshot: dict = {"ok": True}
+    if wallet is not None:
+        total_free = wallet.get("totalFreeTranslateQuota") or 0
+        used_free = wallet.get("useFreeTranslateQuota") or 0
+        free_left = max(0, total_free - used_free)
+        purse = wallet.get("translateQuota") or 0
+        snapshot["quota"] = {
+            "freeLeft": free_left,
+            "freeTotal": total_free,
+            "wallet": purse,
+            "available": free_left + purse,
+            "advanced": wallet.get("advancedTranslateQuota"),
+            "ocr": wallet.get("ocrTranslateQuota"),
+        }
+    if sub is not None:
+        snapshot["vip"] = {
+            "name": sub.get("vipName"),
+            "type": sub.get("vipType"),
+            "expiresOn": _epoch_day(sub.get("endTime")),
+        }
+        limits = {
+            "videoDurationMinutes": sub.get("videoDurationLimit"),
+            "videoFileSizeMB": sub.get("videoFileSize"),
+            "uploadFileSizeMB": sub.get("uploadFileSize"),
+            "videoConcurrency": sub.get("videoTranslateConcurrency"),
+            "docConcurrency": sub.get("concurrenceTask"),
+        }
+        snapshot["limits"] = {k: v for k, v in limits.items() if v is not None}
+    return snapshot
+
+
+def video_duration_over_limit(duration_ms, snapshot: dict):
+    """超没超会员档的单个视频时长上限。判据和服务端逐字一致：
+    VideoTranslateServiceImpl 里是 videoDuration/1000 > videoDurationLimit*60，
+    单位是分钟。查不到限额就返回 None——放行，让服务端自己去拒。"""
+    limit = (snapshot.get("limits") or {}).get("videoDurationMinutes")
+    if not snapshot.get("ok") or not limit or not duration_ms:
+        return None
+    if duration_ms / 1000 <= limit * 60:
+        return None
+    return limit
 
 
 def _human_size(n: float) -> str:
@@ -313,8 +816,8 @@ def _human_size(n: float) -> str:
 def _format_duration(seconds: float) -> str:
     seconds = int(round(seconds))
     if seconds < 60:
-        return f"{max(1, seconds)} 秒"
-    return f"{seconds // 60} 分 {seconds % 60} 秒"
+        return t("duration.seconds", seconds=max(1, seconds))
+    return t("duration.minutes", minutes=seconds // 60, seconds=seconds % 60)
 
 
 def _human_duration(seconds: float) -> str:
@@ -420,6 +923,29 @@ def _prune_waits() -> None:
         _WAITS.pop(k, None)
 
 
+# 等待期间的活口。上游只能轮询，而一次调用要等几十秒到几分钟，这中间客户端
+# 界面上只有一行不动的「正在调用 wait_for_...」——没有进度、也没有计时，用户
+# 分不清是在跑还是卡死了。MCP 的 progress notification 正是干这个的：客户端在
+# 请求里带了 progressToken 就能收到，没带就是空转。推送是锦上添花，失败一律
+# 吞掉，绝不能让它把等待本身弄挂。
+_HEARTBEAT_SECONDS = 5
+# 撞上 30311 限流时退避多久再查。限流不是任务失败，不该把这次等待掐断——
+# 掐断了调用方多半立刻再调一次，正好又撞在枪口上。
+_RATE_LIMIT_BACKOFF = 15
+# 轮询起步间隔（之后各自递增退避）。提出来是为了测试能把等待压短。
+_DOC_POLL_SECONDS = 2
+_VIDEO_POLL_SECONDS = 5
+
+
+async def _emit_progress(on_progress, percent: float, message: str) -> None:
+    if on_progress is None:
+        return
+    try:
+        await on_progress(percent, 100.0, message)
+    except Exception as exc:  # 通道断了、客户端不认这个通知，都不该影响等待
+        print(f"进度推送失败（不影响等待）: {exc}", file=sys.stderr, flush=True)
+
+
 
 class _ProgressReader:
     """包住文件对象，httpx 每读一块就记一次账
@@ -443,96 +969,6 @@ class _ProgressReader:
     def __iter__(self):
         # 只为让 httpx 认出这是个 Iterable，实际取数走上面的 read()
         return iter(lambda: self.read(65536), b"")
-
-
-def _put_file(state: dict, presigned_url: str, encode_file_name: str) -> None:
-    """同步上传，由 asyncio.to_thread 丢到线程里跑，别占着事件循环
-
-    走文件流而不是一次 read() 到内存：几百 MB 的视频不该整个装进 RSS。
-    """
-    try:
-        with open(state["filePath"], "rb") as fh:
-            # 上传耗时完全由文件大小决定，读写不设上限，只卡建连
-            with httpx.Client(timeout=httpx.Timeout(None, connect=30.0)) as c:
-                resp = c.put(
-                    presigned_url,
-                    content=_ProgressReader(fh, state),
-                    headers={
-                        "Content-Disposition": f"attachment; filename*=UTF-8''{encode_file_name}"
-                    },
-                )
-        if resp.status_code == 200:
-            state["uploadedBytes"] = state["totalBytes"]
-            state["status"] = "success"
-        else:
-            state["status"] = "failed"
-            state["error"] = f"S3 返回 HTTP {resp.status_code}: {resp.text[:200]}"
-    except Exception as e:
-        state["status"] = "failed"
-        state["error"] = f"{type(e).__name__}: {e}"
-    finally:
-        state["finishedAt"] = time.monotonic()
-
-
-def _prune_uploads() -> None:
-    """只留最近的记录，别让长跑的服务把内存攒满。dict 有序，先删最老的已完成项。"""
-    if len(_UPLOADS) <= _UPLOAD_KEEP:
-        return
-    done = [k for k, v in _UPLOADS.items() if v["status"] != "uploading"]
-    for k in done[: len(_UPLOADS) - _UPLOAD_KEEP]:
-        _UPLOADS.pop(k, None)
-
-
-def _upload_snapshot(upload_id: str) -> dict:
-    """把某次上传的当前状态整理成可以直接念给用户听的样子"""
-    state = _UPLOADS.get(upload_id)
-    if not state:
-        return {
-            "code": "404",
-            "msg": (
-                f"没有 uploadId={upload_id} 的上传记录（服务重启或记录过期后会丢失），"
-                "请重新调 upload_file。"
-            ),
-        }
-
-    total = state["totalBytes"]
-    sent = min(state["uploadedBytes"], total)
-    elapsed = (state.get("finishedAt") or time.monotonic()) - state["startedAt"]
-    speed = sent / elapsed if elapsed > 0 else 0
-    percent = (sent / total * 100) if total else 100.0
-
-    snapshot = {
-        "uploadId": upload_id,
-        "status": state["status"],
-        "fileName": state["fileName"],
-        "objectKey": state["objectKey"],
-        "fileSize": total,
-        "fileSizeHuman": _human_size(total),
-        "progress": f"{percent:.1f}%",
-        "uploadedHuman": _human_size(sent),
-        "elapsedSeconds": round(elapsed, 1),
-        "speedHuman": f"{_human_size(speed)}/s" if speed else "计算中",
-    }
-
-    if state["status"] == "uploading":
-        remaining = (total - sent) / (speed or _ASSUMED_UPLOAD_BPS)
-        snapshot["etaHuman"] = _human_duration(remaining)
-        msg = (
-            f"上传中 {percent:.1f}%（{_human_size(sent)}/{_human_size(total)}，"
-            f"剩余{_human_duration(remaining)}）。请把这个进度转述给用户，再调一次 "
-            "get_upload_status 继续看；上传在后台跑，不会因此中断。"
-        )
-        return {"code": "202", "data": snapshot, "msg": msg}
-
-    if state["status"] == "success":
-        msg = (
-            f"上传成功（{_human_size(total)}，耗时 {elapsed:.1f} 秒）。"
-            "用 objectKey 作为 fileObjectKey 调 translate_document。"
-        )
-        return {"code": "200", "data": snapshot, "msg": msg}
-
-    snapshot["error"] = state.get("error", "")
-    return {"code": "500", "data": snapshot, "msg": f"上传失败: {snapshot['error']}"}
 
 
 # ============ 重复提交拦截 ============
@@ -567,206 +1003,159 @@ def _record_video_submit(object_key: str, target_language: str, data: dict) -> N
     }
 
 
-# ============ 结果下载（仅同机部署有意义） ============
-# 译制视频和字幕都是几百字符的签名长链接。把它们贴进对话是最糟的收尾：刷屏、
-# 容易被截断成 403、用户还得手工复制。服务端和用户同机时（stdio 模式）完全可以
-# 自己下下来，把收尾变成一行能直接双击打开的本地路径。
-_DOWNLOADS: dict[str, dict] = {}
-_DOWNLOAD_KEEP = 20
-# 还没实测出速度时用来估算剩余时间的保守带宽，只为给个量级
-_ASSUMED_DOWNLOAD_BPS = 4 * 1024 * 1024
-# 想下哪些产物。默认不含原片——那份用户本机上就有，白占带宽。
-DOWNLOAD_ITEMS = {
-    "video": ("targetFileUrl", "译制视频"),
-    "target_subtitles": ("targetSubtitlesUrl", "译文字幕"),
-    "source_subtitles": ("sourceSubtitlesUrl", "原文字幕"),
-    "source_video": ("sourceFileUrl", "原始视频"),
-}
-DOWNLOAD_ITEMS_DEFAULT = ("video", "target_subtitles", "source_subtitles")
+# ============ 提交前的真实确认 ============
+# user_confirmed 是模型自己填的布尔量，服务端核实不了它背后有没有真人点过头——
+# 实测就是试算完直接带 user_confirmed=true 提交，用户全程没被问过，钱已经扣了。
+# 反过来看，任务失败后那道重做闸门是有效的：工具先拒一次、把「重做 / 放弃」两个
+# 选项摆到返回里，模型才会停下来问人。这里把同一个形状搬到首次提交上：
+#   1) 客户端支持 elicitation 时，服务端直接问真人，拿到的答复不经过模型转述；
+#   2) 不支持时退回两步握手——第一次调用一律不提交，只发确认码，模型必须把选项
+#      转述给用户，拿到答复后带确认码再调一次。
+# 确认码一次性、绑定参数指纹：换了文件、目标语言、配音或字幕，之前那次同意就不
+# 作数，得重新问。
+_PENDING_CONFIRMS: dict[str, dict] = {}
+_CONFIRM_TTL = 15 * 60
+_CONFIRM_KEEP = 40
 
 
-def _safe_stem(name: str) -> str:
-    """用原文件名做落地文件名，但先去掉路径分隔符之类的危险字符"""
-    stem = os.path.splitext(os.path.basename(name or ""))[0]
-    stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", stem).strip(" .")
-    return (stem or "video")[:80]
+def confirm_fingerprint(object_key: str, target_language: str, voice_role: str, subtitle_type) -> str:
+    """一次同意只对这一组参数有效。配音和字幕都进指纹——它们直接决定扣多少。"""
+    return "|".join([object_key or "", target_language or "", voice_role or "", str(subtitle_type)])
 
 
-def _unique_path(path: str) -> str:
-    """同名文件不覆盖——同一单下两次时，用户会以为第一份丢了"""
-    if not os.path.exists(path):
-        return path
-    stem, ext = os.path.splitext(path)
-    i = 1
-    while os.path.exists(f"{stem} ({i}){ext}") and i < 1000:
-        i += 1
-    return f"{stem} ({i}){ext}"
+def rewrite_fingerprint(order_no: str, source_txt: str, target_txt: str) -> str:
+    """改写的一次同意，绑到「哪一单 + 哪一版字幕」上
 
-
-def _fetch_files(state: dict) -> None:
-    """顺序下完一组文件，由 asyncio.to_thread 丢到线程里跑，别占着事件循环
-
-    流式写盘，几百 MB 的视频不整个装进内存；先写 .part 再改名，中途失败或被
-    掐断时留不下一个看着像成功的半截文件。读写不设上限，只卡建连——和上传同理。
+    字幕正文也进指纹：用户点头同意的是他刚校对完的那一版，模型拿着这个码再去
+    提交另一版（哪怕只差一行），扣的钱和产出就都不是用户同意过的那个了。
+    正文可能几十 KB，取摘要即可。
     """
-    ok = 0
-    with httpx.Client(
-        timeout=httpx.Timeout(None, connect=30.0), follow_redirects=True
-    ) as c:
-        for item in state["items"]:
-            item["status"] = "downloading"
-            tmp = item["path"] + ".part"
-            try:
-                with c.stream("GET", item["url"]) as resp:
-                    if resp.status_code != 200:
-                        # S3/CloudFront 报错回的是 XML、被反代拦下时回的是整页
-                        # HTML。原样塞进 msg 会把几百字标签糊到用户脸上，只留
-                        # 去标签压空白后的头一句。
-                        body = re.sub(r"<[^>]+>", " ", resp.read()[:600].decode("utf-8", "replace"))
-                        body = re.sub(r"\s+", " ", body).strip()[:120]
-                        raise RuntimeError(f"HTTP {resp.status_code}: {body}")
-                    item["totalBytes"] = int(resp.headers.get("content-length") or 0)
-                    with open(tmp, "wb") as fh:
-                        for chunk in resp.iter_bytes(1024 * 1024):
-                            fh.write(chunk)
-                            item["downloadedBytes"] += len(chunk)
-                os.replace(tmp, item["path"])
-                item["totalBytes"] = item["downloadedBytes"]
-                item["status"] = "success"
-                ok += 1
-            except Exception as e:
-                item["status"] = "failed"
-                item["error"] = f"{type(e).__name__}: {e}"
-                try:
-                    os.remove(tmp)
-                except OSError:
-                    pass
-    state["status"] = (
-        "success" if ok == len(state["items"]) else "partial" if ok else "failed"
-    )
-    state["finishedAt"] = time.monotonic()
+    digest = hashlib.sha256(
+        ((source_txt or "") + "\x00" + (target_txt or "")).encode("utf-8", "replace")
+    ).hexdigest()[:16]
+    return f"rewrite|{order_no or ''}|{digest}"
 
 
-def _prune_downloads() -> None:
-    """只留最近的记录，别让长跑的服务把内存攒满"""
-    if len(_DOWNLOADS) <= _DOWNLOAD_KEEP:
-        return
-    done = [k for k, v in _DOWNLOADS.items() if v["status"] != "downloading"]
-    for k in done[: len(_DOWNLOADS) - _DOWNLOAD_KEEP]:
-        _DOWNLOADS.pop(k, None)
+def issue_submit_confirm(fingerprint: str, meta: Optional[dict] = None) -> str:
+    now = time.time()
+    for token, rec in list(_PENDING_CONFIRMS.items()):
+        if now - rec["at"] > _CONFIRM_TTL:
+            _PENDING_CONFIRMS.pop(token, None)
+    if len(_PENDING_CONFIRMS) > _CONFIRM_KEEP:
+        for token in list(_PENDING_CONFIRMS)[: len(_PENDING_CONFIRMS) - _CONFIRM_KEEP]:
+            _PENDING_CONFIRMS.pop(token, None)
+    token = "CONFIRM-" + secrets.token_hex(3).upper()
+    # meta 记的是「这个码代表菜单里的哪一格」。提交时以它为准，调用方回传的
+    # voice_role / subtitle_type 只作参考——用户点的是那一格，不是模型说的那一格。
+    _PENDING_CONFIRMS[token] = {"at": now, "fingerprint": fingerprint, "meta": meta or {}}
+    return token
 
 
-def _download_snapshot(download_id: str) -> dict:
-    """把某次下载的当前状态整理成可以直接念给用户听的样子。
-    刻意不带 url：本工具存在的意义就是让签名链接不必进对话。"""
-    state = _DOWNLOADS.get(download_id)
-    if not state:
-        return {
-            "code": "404",
-            "msg": (
-                f"没有 downloadId={download_id} 的下载记录（服务重启或记录过期后会丢失），"
-                "请重新调 download_video_result。"
-            ),
-        }
+def peek_submit_confirm(token: str) -> Optional[dict]:
+    """看一眼确认码代表哪一格，不核销。核销仍然走 take_submit_confirm。"""
+    rec = _PENDING_CONFIRMS.get(token or "")
+    if not rec or time.time() - rec["at"] > _CONFIRM_TTL:
+        return None
+    return rec
 
-    elapsed = (state.get("finishedAt") or time.monotonic()) - state["startedAt"]
-    got = sum(i["downloadedBytes"] for i in state["items"])
-    total = sum(i["totalBytes"] or 0 for i in state["items"])
-    speed = got / elapsed if elapsed > 0 else 0
-    percent = (got / total * 100) if total else 0.0
 
-    snapshot = {
-        "downloadId": download_id,
-        "status": state["status"],
-        "orderNo": state["orderNo"],
-        "outputNote": state["outputNote"],
-        "saveDir": state["saveDir"],
-        "files": [
-            {
-                "label": i["label"],
-                "path": i["path"],
-                "status": i["status"],
-                "sizeHuman": _human_size(i["downloadedBytes"]),
-                **({"error": i["error"]} if i.get("error") else {}),
-            }
-            for i in state["items"]
-        ],
-        "progress": f"{percent:.1f}%",
-        "downloadedHuman": _human_size(got),
-        "elapsedSeconds": round(elapsed, 1),
-    }
+def take_submit_confirm(token: str, fingerprint: str) -> tuple[bool, str]:
+    """核销确认码。一次性：同一个码不能拿去提交第二单。"""
+    rec = _PENDING_CONFIRMS.get(token or "")
+    if not rec:
+        return False, (
+            f"确认码 {token!r} 不存在、已过期或已经用掉了——它一次只能提交一单。"
+            "请重新调用本工具（不带 confirm_token）拿新的确认码，并把选项重新问一遍用户。"
+        )
+    if time.time() - rec["at"] > _CONFIRM_TTL:
+        _PENDING_CONFIRMS.pop(token, None)
+        return False, "确认码已过期（有效期 15 分钟）。请重新发起确认，把预算再跟用户说一遍。"
+    if rec["fingerprint"] != fingerprint:
+        return False, (
+            "这个确认码是给另一组参数发的：文件、目标语言、配音、字幕里至少有一项和当时不一样。"
+            "这些都会改变扣费和产出，用户同意的是当时那一组，不能拿来放行现在这一组——"
+            "请不带 confirm_token 重新发起确认。"
+        )
+    _PENDING_CONFIRMS.pop(token, None)
+    return True, ""
 
-    if state["status"] == "downloading":
-        remaining = (total - got) / (speed or _ASSUMED_DOWNLOAD_BPS) if total else 0
-        snapshot["etaHuman"] = _human_duration(remaining)
-        return {
-            "code": "202",
-            "data": snapshot,
-            "msg": (
-                f"下载中 {percent:.1f}%（{_human_size(got)}"
-                + (f"/{_human_size(total)}，剩余{_human_duration(remaining)}" if total else "")
-                + "）。请把这个进度转述给用户，再调一次 get_download_status 继续看；"
-                "下载在后台跑，不会因此中断。"
-            ),
-        }
 
-    done_note = (f"产出：{state['outputNote']}（原样照抄，不要自己推断有没有配音）。"
-                 if state["outputNote"] else "")
-    if state["status"] == "success":
-        return {
-            "code": "200",
-            "data": snapshot,
-            "msg": (
-                f"已下载到 {state['saveDir']}（共 {_human_size(got)}，"
-                f"耗时 {_format_duration(elapsed)}）。{done_note}"
-                "请把 files 里的本地路径逐行念给用户，不要再贴签名链接。"
-            ),
-        }
+# 试算免费、提交真扣费，两边的 voiceRole / subtitleType 必须是同一套，否则
+# 「预算 4 额度」和「实扣 8 额度」之间没有任何东西拦着（clone 配音就是二倍）。
+# 这里把最近的试算记下来，提交时按 (配音, 字幕) 回查，对不上不放行。
+_QUOTA_CALCS: list[dict] = []
+_QUOTA_CALC_WINDOW = 30 * 60
+_QUOTA_CALC_KEEP = 20
 
-    failed = [f"{i['label']}：{i.get('error', '')}" for i in state["items"] if i["status"] == "failed"]
-    return {
-        "code": "500",
-        "data": snapshot,
-        "msg": (
-            ("部分文件下载失败" if state["status"] == "partial" else "下载失败")
-            + "：" + "；".join(failed) + "。已成功的文件路径在 files 里，可以先给用户。"
-            "重试直接再调一次 download_video_result（地址每次都重新签发，不存在过期问题），"
-            "用 items 只补失败的那几项。"
-        ),
-    }
+
+def record_quota_calc(duration_ms: float, voice_role: str, subtitle_type, data: dict) -> None:
+    data = data or {}
+    _QUOTA_CALCS.append({
+        "durationMs": duration_ms,
+        "voiceRole": voice_role,
+        "subtitleType": subtitle_type,
+        "quota": data.get("translateQuota"),
+        "units": data.get("videoDuration"),
+        "at": time.time(),
+    })
+    del _QUOTA_CALCS[:-_QUOTA_CALC_KEEP]
+
+
+def recent_quota_calc(voice_role: str, subtitle_type):
+    """窗口内最近一次、且配音/字幕与本次提交完全一致的试算。"""
+    now = time.time()
+    _QUOTA_CALCS[:] = [c for c in _QUOTA_CALCS if now - c["at"] <= _QUOTA_CALC_WINDOW]
+    for calc in reversed(_QUOTA_CALCS):
+        if calc["voiceRole"] == voice_role and calc["subtitleType"] == subtitle_type:
+            return calc
+    return None
+
+# 上游 language 头的取值文档没有列举，按常见写法映射；上游不认时会退回它的
+# 默认语种，不影响我们的逻辑（分支只认 code）。
+_UPSTREAM_LANGUAGE = {
+    "zh": "zh-CN", "zh-Hant": "zh-TW", "en": "en-US", "ja": "ja-JP", "ko": "ko-KR",
+    "de": "de-DE", "fr": "fr-FR", "ru": "ru-RU", "ar": "ar-SA",
+}
+
+
+async def _set_upstream_language(request) -> None:
+    from .i18n import current as _current_locale
+    request.headers["language"] = _UPSTREAM_LANGUAGE.get(_current_locale(), "zh-CN")
 
 
 class TranslationClient:
     """翻译 API 客户端"""
     
-    def __init__(self, api_key: str, local_fs: bool = True):
+    def __init__(self, api_key: str):
         self.api_key = api_key
-        # 服务端能不能替用户把文件写到他本机。stdio 模式天然可以；HTTP 模式由
-        # 部署者用 MCP_LOCAL_FS 声明。返回文案按它分支——不然会让调用方去调一个
-        # 根本不在工具列表里的 download_video_result，白费一轮。
-        self.local_fs = local_fs
         self.client = httpx.AsyncClient(
             base_url=API_BASE_URL,
             headers={
                 "X-Api-Key": api_key,
                 "Content-Type": "application/json",
-                # 不传这个头，上游的错误信息默认回英文
+                # 不传这个头，上游的错误信息默认回英文。真实取值由
+                # _set_upstream_language 按本次调用的 locale 逐请求覆盖。
                 "language": "zh-CN",
             },
-            timeout=httpx.Timeout(30.0)  # 30秒超时
+            timeout=httpx.Timeout(30.0),  # 30秒超时
+            # 逐请求改 language 头：上游的 msg 按这个头返回语种，而 locale 是
+            # 每次工具调用才知道的。我们自己的分支只认 code，所以就算上游不认
+            # 某个取值、退回默认语种，也只影响透传给用户的那句话。
+            event_hooks={"request": [_set_upstream_language]},
         )
     
     async def close(self):
         await self.client.aclose()
     
-    async def _post(self, path: str, payload: dict) -> dict:
+    async def _post(self, path: str, payload: dict, timeout=None) -> dict:
         """POST 并把 404 翻译成人话
 
         上游对未部署的接口直接回 404，httpx 抛出来的是一句英文 HTTPStatusError，
         调用方会当成网络故障，反复重试或者告诉用户「服务器维护中」——实测视频
         那批接口就是这样被误判的。实际是该接口在当前服务地址上不存在，重试无用。
         """
-        response = await self.client.post(path, json=payload)
+        kwargs = {"timeout": timeout} if timeout is not None else {}
+        response = await self.client.post(path, json=payload, **kwargs)
         if response.status_code == 404:
             return _not_found(path)
         response.raise_for_status()
@@ -889,12 +1278,39 @@ class TranslationClient:
     
     # ============ 配额相关 ============
     
-    async def get_quota(self) -> dict:
-        """查询账户配额"""
-        # 注意：此接口可能不存在，需要后端确认
-        response = await self.client.get(f"{DOC_PREFIX}/getQuota")
-        response.raise_for_status()
-        return response.json()
+    async def get_wallet_info(self) -> dict:
+        """钱包额度。/external/user 是上游 2026-09-02 才开放的开放平台接口"""
+        return await self._post(f"{USER_PREFIX}/getMyWalletInfo", {})
+
+    async def get_subscription_info(self) -> dict:
+        """订阅信息：会员档位、到期时间，以及各项限额"""
+        return await self._post(f"{USER_PREFIX}/getMySubscriptionInfo", {})
+
+    async def account_snapshot(self, refresh: bool = False) -> dict:
+        """额度 + 权益的合并快照，带 5 分钟缓存
+
+        提交前的限额校验每次都要用它，不能每次都打两趟上游。拿不到（老版本
+        服务端没这两个接口、或者网络抖）就返回 ok=False，调用方一律放行——
+        限额校验是锦上添花，不能因为查不到就把用户的正常提交拦下来。
+        """
+        key = _account_key(self.api_key)
+        cached = _ACCOUNTS.get(key)
+        now = time.time()
+        if cached and not refresh and now - cached["at"] < cached["ttl"]:
+            return cached["snapshot"]
+
+        wallet, sub = await asyncio.gather(
+            self.get_wallet_info(), self.get_subscription_info(),
+            return_exceptions=True,
+        )
+        snapshot = _build_account_snapshot(wallet, sub)
+        _ACCOUNTS[key] = {
+            "at": now,
+            "ttl": _ACCOUNT_TTL if snapshot.get("ok") else _ACCOUNT_FAIL_TTL,
+            "snapshot": snapshot,
+        }
+        _prune_accounts()
+        return snapshot
     
     # ============ 文档翻译 ============
     
@@ -909,91 +1325,7 @@ class TranslationClient:
         _attach_upload_command(result)
         return result
     
-    async def upload_file(self, file_path: str, wait: int = 8) -> dict:
-        """上传本地文件到翻译平台
-
-        小文件几秒就传完，那就在这一次调用里等掉；超过 wait 秒还没完成就带着当前
-        进度返回，让调用方转述给用户后再用 get_upload_status 继续查——和
-        wait_for_translation 一个路子，别让用户对着静默的界面干等。
-        """
-        import asyncio
-        import os
-        import uuid
-
-        # 获取文件名
-        file_name = os.path.basename(file_path)
-
-        # 检查文件是否存在
-        # 注意：读文件的是服务端进程。客户端与服务端不在同一台机器时，
-        # 客户端的本地路径在这里必然不存在，且换路径重试没有意义。
-        if not os.path.exists(file_path):
-            import socket
-            return {
-                "code": "400",
-                "msg": (
-                    f"服务端（主机 {socket.gethostname()}）找不到路径 {file_path}。"
-                    "如果 MCP 服务部署在另一台机器上，本工具读不到你本机的文件，"
-                    "换路径或复制到 /tmp 都无效。请改用 upload_document 获取预签名链接，"
-                    "然后按返回的 uploadCommand 原样执行上传（该命令的请求头必须与签名一致，"
-                    "不要改写）。"
-                ),
-                "data": {"serverHost": socket.gethostname(), "triedPath": file_path},
-            }
-
-        # 获取预签名URL
-        upload_info = await self.doc_batch_presigned_upload_url([file_name])
-        if upload_info.get("code") != "200":
-            return upload_info
-
-        upload_data = upload_info["data"][0]
-        upload_id = uuid.uuid4().hex[:12]
-        state = {
-            "filePath": file_path,
-            "fileName": file_name,
-            "objectKey": upload_data["objectKey"],
-            "totalBytes": os.path.getsize(file_path),
-            "uploadedBytes": 0,
-            "status": "uploading",
-            "startedAt": time.monotonic(),
-            "finishedAt": None,
-            "error": "",
-        }
-        _UPLOADS[upload_id] = state
-        _prune_uploads()
-
-        # 丢进线程：之前这里是同步的 httpx.put，上传期间整个事件循环冻结，
-        # 其他工具的轮询全都停摆。task 存进 state，免得被 GC 提前回收。
-        state["_task"] = asyncio.create_task(
-            asyncio.to_thread(
-                _put_file,
-                state,
-                upload_data["persignedUploadUrl"],
-                upload_data["encodeFileName"],
-            )
-        )
-
-        return await self._await_upload(upload_id, wait)
-
-    async def get_upload_status(self, upload_id: str, wait: int = 8) -> dict:
-        """查询 upload_file 发起的上传进度，未完成时最多等 wait 秒再返回"""
-        return await self._await_upload(upload_id, wait)
-
-    @staticmethod
-    async def _await_upload(upload_id: str, wait: int) -> dict:
-        """等一小会儿再给快照，免得调用方空转着反复查"""
-        import asyncio
-
-        state = _UPLOADS.get(upload_id)
-        if state:
-            # 先让出一次：wait=0 时下面的循环一次都不进，上传线程会连启动的
-            # 机会都没有，快照永远停在 0%
-            await asyncio.sleep(0)
-            deadline = time.monotonic() + max(0, wait)
-            while state["status"] == "uploading" and time.monotonic() < deadline:
-                await asyncio.sleep(0.3)
-        return _upload_snapshot(upload_id)
-
-    async def wait_for_translation(self, order_no: str, timeout: int = 45) -> dict:
+    async def wait_for_translation(self, order_no: str, timeout: int = 10, on_progress=None) -> dict:
         """等待翻译任务完成，自动轮询状态
 
         上游只在轮询时给出进度，无法主动推送。两个返回时机：进度一变就立刻返回，
@@ -1011,65 +1343,94 @@ class TranslationClient:
 
         start_time = asyncio.get_event_loop().time()
         last_logged = -1
-        interval = 2  # 轮询间隔，逐步放宽到 8 秒，避免高频打上游
+        interval = _DOC_POLL_SECONDS  # 轮询间隔，逐步放宽到 8 秒，避免高频打上游
         snapshot = {}
+        # 同 wait_for_video_translation：跟上一次返回的那行比，别跟本轮基线比
+        entry_key = record["lastKey"]
+
+        def elapsed_now() -> float:
+            return asyncio.get_event_loop().time() - start_time
+
+        def live_percent() -> float:
+            try:
+                return float(str(snapshot.get("progress", "0")).rstrip("%"))
+            except ValueError:
+                return 0.0
+
+        def status_line(total_seconds: float, polls: bool = False) -> str:
+            """要念给用户听的那一行：状态 · 百分比 · 排队 · 已提交多久 · 已等多久。
+            整行都走消息表——它会被原样转述给用户，混着中文就成了半截译文。"""
+            parts = [snapshot.get("statusText") or t("progress.querying")]
+            if snapshot.get("progress"):
+                parts.append(snapshot["progress"])
+            if snapshot.get("queueRank"):
+                parts.append(t("progress.queue", rank=snapshot["queueRank"],
+                               total=snapshot["queueTotal"]))
+            if snapshot.get("sinceSubmit"):
+                parts.append(t("progress.since_submit", duration=snapshot["sinceSubmit"]))
+            duration = _format_duration(total_seconds)
+            parts.append(
+                t("progress.polls", calls=record["calls"], duration=duration)
+                if polls else t("progress.waited", duration=duration)
+            )
+            return " · ".join(parts)
+
+        def live_line() -> str:
+            return status_line(record["totalElapsed"] + elapsed_now())
+
+        async def heartbeat(seconds: float) -> None:
+            """轮询间隔照旧，但计时每 _HEARTBEAT_SECONDS 秒就走一格"""
+            deadline = elapsed_now() + seconds
+            while True:
+                left = deadline - elapsed_now()
+                if left <= 0 or elapsed_now() > timeout:
+                    return
+                await asyncio.sleep(min(_HEARTBEAT_SECONDS, left))
+                await _emit_progress(on_progress, live_percent(), live_line())
 
         def pending(elapsed: float, changed: bool) -> dict:
             """排队/翻译中时的返回体，带上跨调用的累计等待"""
+            changed = changed or _wait_key(snapshot) != entry_key
             record["totalElapsed"] += elapsed
             record["lastKey"] = _wait_key(snapshot)
             total = record["totalElapsed"]
-            head = (
-                f"{snapshot.get('statusText', '处理中')}"
-                f"{' ' + snapshot['progress'] if snapshot.get('progress') else ''}"
-            )
-            queue = (
-                f"，排队第 {snapshot['queueRank']}/{snapshot['queueTotal']} 位"
-                if snapshot.get("queueRank")
-                else ""
-            )
-            # 从提交算起的时长——用户等的是这个，不是我们从第几次调用开始数的
-            since = (
-                f"，任务已提交 {snapshot['sinceSubmit']}"
-                if snapshot.get("sinceSubmit")
-                else ""
-            )
             # 不管进度变没变，都要求把当前进度说出来。之前写的是「没变化就不必
             # 复述」，结果调用方在这些回合里什么都不说，界面上只剩一串省略号。
             tail = (
-                "。请把上面这行进度原样告诉用户"
-                + ("（进度有更新）" if changed else "（进度与上次相同，也照样说，不要沉默或跳过）")
-                + "，然后再次调用 wait_for_translation 继续等待。"
+                "。把这行原样告诉用户，然后再次调用本工具继续等待。"
+                if changed else
+                # 同视频等待：没有新东西可说的那一轮不该产生任何输出
+                "。进度和上次完全一样，没有新东西可告诉用户："
+                "**不要输出任何文字**（连「继续等待」这类过场话也不要），"
+                "直接再次调用本工具继续等待。等到进度真的变了或任务结束，再开口。"
             )
+            # data 原来把 statusText/progress/排队位置又抄一遍，和 msg 说的是同一
+            # 件事；一个任务要轮询十几次，两份重复就把对话刷满了。机器要用的只有
+            # finished，剩下的话全在 msg 那一行里。
             return {
                 "code": "202",
-                "msg": (
-                    f"{head}（本次等待 {_format_duration(elapsed)}，"
-                    f"累计已等待 {_format_duration(total)}，第 {record['calls']} 次查询）"
-                    f"{queue}{since}{tail}"
-                ),
-                "data": {
-                    "orderNo": order_no,
-                    "elapsed": round(elapsed),
-                    "totalElapsedSeconds": round(total),
-                    "totalWaited": _format_duration(total),
-                    "pollCount": record["calls"],
-                    "changedSinceLastCall": changed,
-                    "finished": False,
-                    **snapshot,
-                },
+                "msg": status_line(total, polls=True) + tail,
+                "data": {"orderNo": order_no, "finished": False},
             }
+
+        await _emit_progress(on_progress, 0.0, live_line())
 
         while True:
             # 检查超时
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = elapsed_now()
             if elapsed > timeout:
                 return pending(elapsed, changed=False)
 
             # 查询翻译状态
             try:
                 status = await self.get_translate_file_detail(order_no)
-                if status.get("code") != "200":
+                code = str(status.get("code") or "")
+                if code != "200":
+                    if code in KEY_ERROR_RETRYABLE:
+                        # 限流：退避接着等，等待本身不算失败
+                        await heartbeat(max(interval, _RATE_LIMIT_BACKOFF))
+                        interval = min(interval + 1, 8)
+                        continue
                     _WAITS.pop(order_no, None)
                     return status
 
@@ -1153,8 +1514,7 @@ class TranslationClient:
                         "downloadUrl": target_url,
                         "downloadUrlCN": target_url_cn,
                         "downloadNote": (
-                            ("这是带水印的版本（账号没有无水印下载权限）。"
-                             if watermark else "这是无水印的纯译文。")
+                            t("download.doc.watermark" if watermark else "download.doc.clean")
                             + "downloadUrlCN 是同一份文件的国内兜底线路"
                             "（只有纯译文有，对照版式没有兜底线路），前者慢或不通时改用后者。"
                             + _URL_VERBATIM_NOTE
@@ -1176,7 +1536,7 @@ class TranslationClient:
                     }
                 elif task_status in TASK_STATUS_PENDING:
                     # 未开始/解析中/翻译中，记录快照供返回时带出
-                    status_text = TASK_STATUS_TEXT[task_status]
+                    status_text = doc_status_text(task_status)
                     snapshot = {
                         "statusText": status_text,
                         "progress": f"{progress:.1f}%",
@@ -1192,6 +1552,8 @@ class TranslationClient:
                         snapshot["queueRank"] = progress_info.get("taskRanking")
                         snapshot["queueTotal"] = progress_info.get("totalTask")
                         snapshot["predictWaitSeconds"] = progress_info.get("predictWaitTime")
+
+                    await _emit_progress(on_progress, live_percent(), live_line())
 
                     key = _wait_key(snapshot)
                     if record["lastKey"] is None:
@@ -1217,8 +1579,9 @@ class TranslationClient:
                         "data": data
                     }
 
-                # 递增退避：2s 起，逐步放宽到 8s 上限
-                await asyncio.sleep(interval)
+                # 递增退避：2s 起，逐步放宽到 8s 上限。等的过程里每
+                # _HEARTBEAT_SECONDS 秒推一次计时，别让界面整段静默。
+                await heartbeat(interval)
                 interval = min(interval + 1, 8)
 
             except httpx.HTTPError as e:
@@ -1228,13 +1591,122 @@ class TranslationClient:
                 print(f"查询出错: {e}，{interval}秒后重试...", file=sys.stderr, flush=True)
                 await asyncio.sleep(interval)
 
+    async def check_file_is_ocr(self, file_object_key: str, storage_type=None, timeout: float = 60.0) -> dict:
+        """这份文件是不是扫描件（只对 PDF 有意义）
+
+        上游拿 objectKey 现签一个 30 分钟的地址交给分类器，回 isOcr / isDoubleDeck。
+        注意分类器打不通时上游会保守地回 isOcr=1，从响应上分不出「确实是扫描件」
+        和「没测成」——所以这个结果只用来定 isOcrFile，不拿去跟用户断言什么。
+        """
+        return await self._post(
+            f"{DOC_PREFIX}/isOcr",
+            {
+                "fileObjectKey": file_object_key,
+                "storageType": storage_type if storage_type is not None else storage_type_of(file_object_key),
+            },
+            # 上游要把整个 PDF 下下来交给分类器。网页端给这一步留了 120 秒，
+            # 但 MCP 是一问一答，挂两分钟没法交代，所以只给一个够用的上限，
+            # 测不出来就当没测过——这一步失败不影响翻译。
+            timeout=timeout,
+        )
+
+    def start_ocr_detection(self, object_key: str, file_name: str = "") -> None:
+        """文件一落到 S3 就把检测发出去，不等结果
+
+        网页端给这一步留了 120 秒——它要把整个 PDF 下下来分析。同步等着会让上传
+        工具凭空多挂十几秒，而这段时间用户本来正在挑模型和语言。
+        """
+        if not object_key or ocr_of(object_key) or object_key in _OCR_TASKS:
+            return
+        task = asyncio.ensure_future(
+            self.detect_ocr_for_key(object_key, file_name, timeout=120.0)
+        )
+        _OCR_TASKS[object_key] = task
+
+        def _done(finished, key=object_key):
+            _OCR_TASKS.pop(key, None)
+            # 取一下异常，免得事件循环打印 "Task exception was never retrieved"
+            if not finished.cancelled():
+                finished.exception()
+
+        task.add_done_callback(_done)
+
+    async def detect_ocr_for_key(
+        self, object_key: str, file_name: str = "", timeout: float = 60.0
+    ) -> Optional[dict]:
+        """检测一个已经传上去的 PDF，并把结果记下来。测不出来返回 None。"""
+        cached = ocr_of(object_key)
+        if cached:
+            return cached
+        running = _OCR_TASKS.get(object_key)
+        if running is not None:
+            # 上传那会儿已经发出去了，等它就好，别再打一趟。等不及也不取消——
+            # 它跑完照样会把结果写进缓存，下一次就能直接取。
+            try:
+                return await asyncio.wait_for(asyncio.shield(running), timeout)
+            except Exception:
+                return None
+        try:
+            result = await self.check_file_is_ocr(object_key, timeout=timeout)
+        except Exception:
+            return None
+        if not isinstance(result, dict) or str(result.get("code")) != "200":
+            return None
+        data = result.get("data") or {}
+        if data.get("isOcr") is None:
+            return None
+        # 网页端把这两个字段声明成 string | number，实测两种都出现过。
+        # 拿 == 1 去比字符串 "1" 会静默地判成「不是扫描件」，所以先归一化。
+        info = {
+            "fileName": file_name,
+            "isOcr": 1 if str(data.get("isOcr")) == "1" else 0,
+            "isDoubleDeck": 1 if str(data.get("isDoubleDeck")) == "1" else 0,
+        }
+        remember_ocr(object_key, info)
+        return info
+
+    async def _detect_ocr(self, files: list) -> dict:
+        """并发检测 file_list 里的 PDF。非 PDF 一律跳过——扫描件这个概念只对 PDF 成立。
+
+        检测失败就当没检测过：宁可按调用方给的值提交，也不能因为一个辅助接口
+        抽风把整批任务卡住。
+        """
+        targets = [
+            f for f in files
+            if is_pdf(f.get("fileName")) and f.get("fileObjectKey")
+        ]
+        if not targets:
+            return {}
+        # 上传那一步大概率已经测过了，命中缓存就不再打上游
+        detected = {}
+        pending = []
+        for item in targets:
+            cached = ocr_of(item["fileObjectKey"])
+            if cached:
+                detected[item["fileObjectKey"]] = cached
+            else:
+                pending.append(item)
+        if not pending:
+            return detected
+        results = await asyncio.gather(
+            *[
+                self.detect_ocr_for_key(f["fileObjectKey"], f.get("fileName", ""))
+                for f in pending
+            ],
+            return_exceptions=True,
+        )
+        for item, info in zip(pending, results):
+            if isinstance(info, dict):
+                detected[item["fileObjectKey"]] = info
+        return detected
+
     async def batch_submit_translate_task(
         self,
         file_list: list[dict],
         source_language: str,
         target_language: str,
         model: str = "Gemini-2.5-Flash",
-        is_ocr: int = 0,
+        is_ocr=None,
     ) -> dict:
         """批量提交文档翻译任务
 
@@ -1242,12 +1714,70 @@ class TranslationClient:
         避免调用方误判成上传失败而重新上传文件。
         """
         import asyncio
-        
+
+        # 是不是扫描件，调用方无从知道——它手里只有文件名。之前这个参数是模型
+        # 自己拍的：扫描件按普通 PDF 提交会翻出一片空白，而 OCR 走的是另一档
+        # 额度（ocrTranslateQuota），拍错哪边都要付代价。上游 2026-09-02 开了
+        # isOcr 接口，PDF 一律以它为准，调用方传的值只在两者不一致时拿来对照。
+        requested_ocr = is_ocr
+        detected = await self._detect_ocr(file_list)
+        pdfs = [f for f in file_list if is_pdf(f.get("fileName"))]
+        scanned = [d["fileName"] for d in detected.values() if d["isOcr"] == 1]
+        undetected = [
+            f.get("fileName") for f in pdfs
+            if f.get("fileObjectKey") not in detected
+        ]
+        all_scanned = bool(detected) and not undetected and len(scanned) == len(detected)
+
+        # 批级 isOcr 是「强制整批走 OCR」的开关：服务端 TranslateFileHistoryServiceImpl
+        # 里 ocrSwatch==1 时每个 PDF 都按 OCR 记账，压根不看逐文件的检测结果。所以
+        # 只有整批 PDF 都是扫描件才敢打开它——混着文本版一起强制，那几份就白扣 OCR
+        # 额度了。混合批次只标逐文件的 isOcrFile，由服务端在自动 OCR 模式下逐个定。
+        if is_ocr is None:
+            is_ocr = 1 if all_scanned else 0
+
+        ocr_note = ""
+        if scanned:
+            ocr_note = (
+                f"服务端判定这些是扫描件：{'、'.join(n for n in scanned if n)}。"
+                "扫描件走 OCR，扣的是 OCR 额度，和普通翻译不是同一本账，请告诉用户。"
+            )
+            if not all_scanned and not is_ocr:
+                ocr_note += (
+                    "注意这批里既有扫描件也有文本版 PDF，没有整批强制 OCR（那会让文本版"
+                    "白扣 OCR 额度）：扫描件到底走不走 OCR，取决于账号的「自动 OCR」开关，"
+                    "本接口看不到那个开关。要确保扫描件走 OCR，就把它单独提交一批。"
+                )
+        elif detected:
+            ocr_note = "服务端判定这批 PDF 都是文本版，按普通翻译提交（没有走 OCR）。"
+        if requested_ocr == 1 and detected and not scanned:
+            ocr_note += (
+                "你传了 is_ocr=1，但服务端判定这些 PDF 都是文本版——强制 OCR 会去扣 "
+                "OCR 额度，且译文未必更好。除非用户明确要求，否则不要传这个参数。"
+            )
+        elif requested_ocr == 0 and scanned:
+            ocr_note += (
+                "你传了 is_ocr=0，但里面有扫描件；已按文件标上 isOcrFile=1，"
+                "最终走不走 OCR 由服务端的自动 OCR 模式决定。"
+            )
+        double_deck = [d["fileName"] for d in detected.values() if d.get("isDoubleDeck") == 1]
+        if double_deck:
+            ocr_note += f"其中 {'、'.join(n for n in double_deck if n)} ".rstrip() + "：" + DOUBLE_DECK_NOTE
+        if undetected:
+            ocr_note += (
+                f"另外这些 PDF 没能判断是不是扫描件（检测接口没答上来）：{'、'.join(undetected)}，"
+                f"按 is_ocr={is_ocr} 提交了。如果译文出来是空白，多半就是扫描件，"
+                "带 is_ocr=1 重新提交一次。"
+            )
+
         # 文档 4：启用 OCR 时每个文件也要带 isOcrFile=1；普通文档 isMath/isFlow 传 0
         files = []
         for item in file_list:
             item = dict(item)
-            if is_ocr and "isOcrFile" not in item:
+            hit = detected.get(item.get("fileObjectKey"))
+            if hit is not None:
+                item["isOcrFile"] = 1 if hit["isOcr"] == 1 else 0
+            elif is_ocr and "isOcrFile" not in item:
                 item["isOcrFile"] = 1
             files.append(item)
 
@@ -1275,20 +1805,21 @@ class TranslationClient:
         
         # 这些错误是上传侧的，重试提交没用，必须重新走预签名+上传
         if result.get("code") in REUPLOAD_CODES:
-            result["msg"] = (
-                f"{result.get('msg')}（{REUPLOAD_CODES[result['code']]}）。"
-                "请重新调 upload_document 取预签名地址并重新上传，"
-                "再用新的 objectKey 提交，重试本工具没有用。"
+            # msg 交给出口的 annotate_error 统一翻（那边是九种语言），这里只补
+            # 本路径特有的细节——同 31004，用 diagnosis 装，别去抢 msg。
+            result["diagnosis"] = (
+                f"{REUPLOAD_CODES[result['code']]}。上游原话：{result.get('msg')}。"
+                "请重新调 upload_document 取预签名地址并重新上传，再用新的 objectKey "
+                "提交，重试本工具没有用。"
             )
-            return result
+            return annotate_error(result)
 
         # 重试后仍失败：明确告知文件无需重传，避免调用方回头做上传
         if result.get("code") in TRANSIENT_CODES:
             result["msg"] = (
-                f"{result.get('msg')}（已自动重试 4 次）。"
-                "这是翻译服务的瞬时故障，与上传无关：文件已上传成功，"
-                "fileObjectKey 仍然有效，请稍后用相同参数重试 translate_document，"
-                "不要重新上传文件。"
+                t("error.biz.transient", code=result.get("code"))
+                + "（已自动重试 4 次）——文件已上传成功，fileObjectKey 仍然有效，"
+                  "请稍后用相同参数重试 translate_document，不要重新上传文件。"
             )
         
         # 上游不返回订单号，提交后回查一次，避免调用方去翻列表
@@ -1315,7 +1846,12 @@ class TranslationClient:
                     )
             except Exception:
                 pass  # 回查失败不影响提交结果
-        
+
+        if ocr_note and str(result.get("code")) == "200":
+            result["msg"] = ocr_note + (result.get("msg") or "")
+            if detected:
+                result["ocrDetection"] = list(detected.values())
+
         return result
     
     async def search_translate_file_by_batch_no(self, batch_no: str) -> dict:
@@ -1443,42 +1979,13 @@ class TranslationClient:
         )
         return result
     
-    # ============ 图片翻译 ============
-    
-    async def submit_image_translate(
-        self,
-        source_language: str,
-        target_language: str,
-        image_url: str,
-    ) -> dict:
-        """提交图片翻译任务"""
-        response = await self.client.post(
-            f"{DOC_PREFIX}/submitImageTranslate",
-            json={
-                "sourceLanguage": source_language,
-                "targetLanguage": target_language,
-                "imageUrl": image_url,
-            }
-        )
-        response.raise_for_status()
-        return response.json()
-    
-    async def get_image_translate_detail(self, order_no: str) -> dict:
-        """查询图片翻译详情"""
-        response = await self.client.get(
-            f"{DOC_PREFIX}/getImageTranslateDetail",
-            params={"orderNo": order_no}
-        )
-        response.raise_for_status()
-        return response.json()
-    
     # ============ 视频翻译 ============
     
     async def video_batch_presigned_upload_url(self, file_name_list: list[str]) -> dict:
         """批量获取视频预签名上传 URL"""
         result = await self._post(f"{VIDEO_PREFIX}/batchPresignedUploadUrl", {"fileNameList": file_name_list})
 
-        _attach_upload_command(result)
+        _attach_upload_command(result, "video")
         return result
     
     async def submit_video_translate(
@@ -1523,6 +2030,9 @@ class TranslationClient:
                 "这里的额度是本次消耗，不是账户余额，本接口不返回余额，不要当成余额报给用户。"
                 "接着用 wait_for_video_translation 跟进。"
             )
+            # 回执里刚提交的任务还什么都没有：十几个 null 的 objectKey/地址字段、
+            # 一串 id、外加一份 paramJson。要点全在 msg 里了，记录只留能对上号的那几项。
+            result["data"] = slim_video_record(_annotate_video_status(data))
         return result
     
     async def video_translate_quota_calculate(
@@ -1567,8 +2077,45 @@ class TranslationClient:
                 "（ffprobe 或媒体信息），按文件大小推码率猜出来的数在数量级上就不成立，"
                 "拿它报给用户等于报了个假预算。"
             )
+            # 提交时要回查这一条：只有和本次提交参数一致的试算才放行，
+            # 免得「按不配音报预算、按 clone 配音扣费」。
+            record_quota_calc(video_duration, voice_role, subtitle_type, data)
         return result
     
+    async def video_translate_quota_matrix(self, video_duration: float, combos=VIDEO_COMBOS) -> list:
+        """把每个「配音 × 字幕」组合的额度都向上游问一遍。
+
+        试算免费，所以宁可多问几次，也不要让用户在没有数字的选项里挑。顺带把每
+        一格都记进试算台账——用户挑中哪一格，提交时的参数校验就已经有账可查。
+        某一格问不到就按计费规则推一个，并在 source 上标成 rule。
+        """
+        results = await asyncio.gather(
+            *[self.video_translate_quota_calculate(video_duration, v, s) for v, s in combos],
+            return_exceptions=True,
+        )
+        rows = []
+        for (voice_role, subtitle_type), result in zip(combos, results):
+            quota = None
+            if isinstance(result, dict):
+                quota = (result.get("data") or {}).get("translateQuota")
+            source = "upstream"
+            if quota is None:
+                quota = quota_by_rule(video_duration, voice_role, subtitle_type)
+                source = "rule"
+                # 上游没答的那一格也要落账，否则用户挑了它反而提交不了
+                record_quota_calc(video_duration, voice_role, subtitle_type, {
+                    "translateQuota": quota,
+                    "videoDuration": max(1, math.ceil((video_duration or 0) / VIDEO_QUOTA_UNIT_MS)),
+                })
+            rows.append({
+                "voiceRole": voice_role,
+                "subtitleType": subtitle_type,
+                "label": video_combo_label(voice_role, subtitle_type),
+                "quota": quota,
+                "source": source,
+            })
+        return rows
+
     async def search_video_translate_page(
         self,
         page_num: int = 1,
@@ -1580,13 +2127,21 @@ class TranslationClient:
         if status is not None:
             params["status"] = status
         result = await self._post(f"{VIDEO_PREFIX}/searchVideoTranslatePage", params)
-        for record in (result.get("data") or {}).get("records") or []:
-            _annotate_video_status(record)
+        page = result.get("data") or {}
+        records = page.get("records") or []
+        # 列表是拿来浏览的，不是拿来交付的：每条记录原来挂着四条几百字符的签名
+        # 地址，十条就上万字符，而其中九条根本用不上。要下载再按单号取。
+        if isinstance(page, dict) and records:
+            page["records"] = [
+                slim_video_record(_annotate_video_status(record)) for record in records
+            ]
         if result.get("code") == "200":
             result["statusNote"] = (
                 "视频任务状态：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消"
                 "——注意 2 就是完成，和文档翻译的状态码不是一套。"
-                "只保留最近 15 天的记录；各 *Url 为临时签名地址，60 分钟内有效。"
+                "只保留最近 15 天的记录。列表不带下载地址：要哪一单的产出，"
+                "就拿它的 videoTranslateOrderNo 调 get_video_translation_status 取链接，"
+                "那边是现签发的，不用担心列表里的地址过期。"
             )
         return result
     
@@ -1645,7 +2200,7 @@ class TranslationClient:
             {"videoTranslateRewriteOrderNo": order_no},
         )
 
-    async def wait_for_video_translation(self, order_no: str, timeout: int = 60) -> dict:
+    async def wait_for_video_translation(self, order_no: str, timeout: int = 10, on_progress=None) -> dict:
         """等待视频翻译任务完成
 
         和 wait_for_translation 同一套路子：进度一变就返回，否则最多等 timeout 秒，
@@ -1662,48 +2217,91 @@ class TranslationClient:
         _prune_waits()
 
         start_time = asyncio.get_event_loop().time()
-        interval = 5  # 逐步放宽到 15 秒，文档建议 10-30 秒一次
+        interval = _VIDEO_POLL_SECONDS  # 逐步放宽到 15 秒，文档建议 10-30 秒一次
         snapshot = {}
+        # 上一次返回给用户的那一行长什么样。判「变没变」要跟它比，而不是跟本次
+        # 循环里刚立的基线比——否则首次调用也会被判成「和上次一样」，用户第一眼
+        # 看到的就是一句「仍在…」的省略话。
+        entry_key = record["lastKey"]
+
+        def elapsed_now() -> float:
+            return asyncio.get_event_loop().time() - start_time
+
+        def live_percent() -> float:
+            try:
+                return float(str(snapshot.get("progress", "0")).rstrip("%"))
+            except ValueError:
+                return 0.0
+
+        def status_line(total_seconds: float, polls: bool = False) -> str:
+            """要念给用户听的那一行，整行都走消息表。累计时长从 record 起算，
+            跨调用接着数，不然每调一次计时都归零。"""
+            parts = [snapshot.get("statusText") or t("progress.querying")]
+            if snapshot.get("progress"):
+                parts.append(snapshot["progress"])
+            if snapshot.get("queueRank"):
+                parts.append(t("progress.queue", rank=snapshot["queueRank"],
+                               total=snapshot["queueTotal"]))
+            duration = _format_duration(total_seconds)
+            parts.append(
+                t("progress.polls", calls=record["calls"], duration=duration)
+                if polls else t("progress.waited", duration=duration)
+            )
+            return " · ".join(parts)
+
+        def live_line() -> str:
+            return status_line(record["totalElapsed"] + elapsed_now())
+
+        async def heartbeat(seconds: float) -> None:
+            """轮询间隔照旧（别去多打上游），但计时每 _HEARTBEAT_SECONDS 秒走一格"""
+            deadline = elapsed_now() + seconds
+            while True:
+                left = deadline - elapsed_now()
+                if left <= 0 or elapsed_now() > timeout:
+                    return
+                await asyncio.sleep(min(_HEARTBEAT_SECONDS, left))
+                await _emit_progress(on_progress, live_percent(), live_line())
 
         def pending(elapsed: float, changed: bool) -> dict:
+            changed = changed or _wait_key(snapshot) != entry_key
             record["totalElapsed"] += elapsed
             record["lastKey"] = _wait_key(snapshot)
             total = record["totalElapsed"]
-            queue = (
-                f"，排队第 {snapshot['queueRank']}/{snapshot['queueTotal']} 位"
-                if snapshot.get("queueRank")
-                else ""
-            )
+            # 一轮进度只留一句 msg。以前 data 里把 statusText/progress/排队位置
+            # 又抄了一遍，每次返回两份同样的话，等一个视频要轮询十几次，光这些
+            # 重复就把对话刷满了。机器要用的只有 finished。
             return {
                 "code": "202",
                 "msg": (
-                    f"{snapshot.get('statusText', '处理中')}"
-                    f"{' ' + snapshot['progress'] if snapshot.get('progress') else ''}"
-                    f"（本次等待 {_format_duration(elapsed)}，"
-                    f"累计已等待 {_format_duration(total)}，第 {record['calls']} 次查询）"
-                    f"{queue}。请把上面这行进度原样告诉用户"
-                    + ("（进度有更新）" if changed else "（进度与上次相同，也照样说，不要沉默或跳过）")
-                    + "，然后再次调用 wait_for_video_translation 继续等待。"
+                    status_line(total, polls=True) + "。"
+                    + (
+                        "把这行原样告诉用户，然后再次调用本工具继续等待。"
+                        if changed else
+                        # 排队时进度能十几分钟一动不动。之前每轮都要求复述，屏幕上
+                        # 就是一屏一模一样的进度加一堆过场文字——轮询本身不该产生
+                        # 输出。没有新东西可说时就什么都别说，直接接着等。
+                        "进度和上次完全一样，没有新东西可告诉用户："
+                        "**不要输出任何文字**（连「继续等待」「仍在处理」这类过场话也不要），"
+                        "直接再次调用本工具继续等待。等到进度真的变了或任务结束，再开口。"
+                    )
                 ),
-                "data": {
-                    "orderNo": order_no,
-                    "elapsed": round(elapsed),
-                    "totalElapsedSeconds": round(total),
-                    "totalWaited": _format_duration(total),
-                    "pollCount": record["calls"],
-                    "changedSinceLastCall": changed,
-                    "finished": False,
-                    **snapshot,
-                },
+                "data": {"orderNo": order_no, "finished": False},
             }
 
+        await _emit_progress(on_progress, 0.0, live_line())
+
         while True:
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = elapsed_now()
             if elapsed > timeout:
                 return pending(elapsed, changed=False)
 
             detail = await self.get_video_translate_detail(order_no)
-            if detail.get("code") not in ("200", 200):
+            code = str(detail.get("code") or "")
+            if code != "200":
+                if code in KEY_ERROR_RETRYABLE:
+                    await heartbeat(max(interval, _RATE_LIMIT_BACKOFF))
+                    interval = min(interval + 2, 15)
+                    continue
                 _WAITS.pop(order_no, None)
                 return detail
 
@@ -1713,61 +2311,50 @@ class TranslationClient:
 
             if status == VIDEO_STATUS_DONE:
                 _WAITS.pop(order_no, None)
-                target = data.get("targetFileUrl")
+                urls, rewrite = video_products(data)
+                target = urls.get("targetFileUrl")
                 note = data.get("outputNote") or ""
                 # 产出说明必须挤进 msg。实测三条几百字符的签名链接会把 data 尾部
                 # 顶出客户端的显示截断线，调用方压根读不到 outputNote，于是照着
                 # 十几轮之前自己传过的参数瞎编——voiceRole=No 也能说成「英文配音」。
                 # msg 是每一轮都被完整转述的字段，是唯一放得住这句话的地方。
-                return {
+                # 其余字段能省则省：几百字符的签名链接后面再挂一段说明，
+                # 长到会把前面的产出说明顶出显示区。
+                result = {
                     "code": "200",
                     "msg": (
                         f"视频翻译完成（累计等待 {_format_duration(total)}）。"
                         + (f"产出：{note}（这句请原样照抄，不要自己推断有没有配音）。" if note else "")
-                        + (
-                            "接着调 download_video_result 把视频和字幕直接下到用户本机，"
-                            "不要把签名链接贴给用户。"
-                            if self.local_fs
-                            else "本次部署没有开放服务端落盘（工具列表里没有 download_video_result），"
-                            "请按 downloadNote 把签名链接原样完整交给用户。"
-                        )
+                        + "请按 downloadNote 把签名链接原样完整交给用户。"
                     ),
                     "data": {
-                        # 短字段一律排在长链接前面，理由同上：链接会把后面的挤没
                         "orderNo": order_no,
                         "finished": True,
                         "outputNote": note,
+                        **({"rewriteOrderNo": rewrite["rewriteOrderNo"]} if rewrite else {}),
                         "videoFileName": data.get("videoFileName"),
-                        "sourceLanguage": data.get("sourceLanguage"),
                         "targetLanguage": data.get("targetLanguage"),
                         "videoDurationMs": data.get("videoDuration"),
-                        "elapsed": round(elapsed),
-                        "totalElapsedSeconds": round(total),
                         "totalWaited": _format_duration(total),
                         "usedFreeQuota": data.get("freeTranslateQuota"),
                         "usedWalletQuota": data.get("walletTranslateQuota"),
+                    },
+                }
+                if target:
+                    # 只给要交付的那两条；原片和原文字幕真要用再去
+                    # get_video_translation_status 取，没必要每单都甩四条签名地址。
+                    result["data"].update({
                         "expiresAt": _expires_at(target),
                         "downloadNote": (
-                            (
-                                "下载首选 download_video_result（order_no 传本单号）：它由服务端"
-                                "直接把文件写到用户本机，返回一行本地路径，不用把签名链接贴进对话。"
-                                "拿不到该工具时才退回用下面这些链接——"
-                                if self.local_fs
-                                else "本次部署没有开放服务端落盘，只能给链接——"
-                            )
-                            + "translatedVideoUrl 是译制后的视频，targetSubtitlesUrl 是译文字幕。"
+                            t("download.video")
                             + _URL_VERBATIM_NOTE
                             + _expiry_note(target)
-                            + "要人工校对字幕再重新生成，用 get_video_subtitles 取字幕、"
-                            "改好后调 rewrite_video_subtitles（会再次扣费）。"
                         ),
                         # 链接垫底
                         "translatedVideoUrl": target,
-                        "sourceVideoUrl": data.get("sourceFileUrl"),
-                        "targetSubtitlesUrl": data.get("targetSubtitlesUrl"),
-                        "sourceSubtitlesUrl": data.get("sourceSubtitlesUrl"),
-                    },
-                }
+                        "targetSubtitlesUrl": urls.get("targetSubtitlesUrl"),
+                    })
+                return result
 
             if status in VIDEO_STATUS_TERMINAL:
                 # 3 失败 / 4 已取消
@@ -1777,14 +2364,16 @@ class TranslationClient:
                 # 并据此改参数重提。原因不明就明说不明，别给它留想象空间；
                 # step 是真有的信息，起码能说清楚死在哪一步。
                 reason = data.get("errorMessage") or ""
-                step_text = data.get("stepText") or VIDEO_STEP_TEXT.get(data.get("step"), "")
+                step_text = data.get("stepText") or (
+                    video_step_text(data["step"]) if data.get("step") is not None else ""
+                )
                 return {
                     "code": "500",
                     "msg": (
-                        f"视频任务已终止：{VIDEO_STATUS_TEXT.get(status, status)}"
+                        f"视频任务已终止：{video_status_text(status)}"
                         + (f"，停在「{step_text}」这一步" if step_text else "")
                         + (f"，上游给的原因：{reason}" if reason
-                           else "，上游没有给出失败原因——请如实告诉用户「原因不明」，"
+                           else f"，上游没有给出失败原因——请如实告诉用户「{t('reason.unknown')}」，"
                                 "不要自己推测是音频、语言还是格式的问题")
                         + f"。累计等待 {_format_duration(total)}。"
                         "重新提交是一单新任务、会再扣一次费，所以必须先把上面这些告诉用户、"
@@ -1796,7 +2385,7 @@ class TranslationClient:
                         "finished": True,
                         "failed": True,
                         "status": status,
-                        "statusText": VIDEO_STATUS_TEXT.get(status, str(status)),
+                        "statusText": video_status_text(status),
                         "failedStep": data.get("step"),
                         "failedStepText": step_text,
                         "reasonKnown": bool(reason),
@@ -1807,9 +2396,9 @@ class TranslationClient:
                 }
 
             # 0 未开始 / 1 进行中
-            status_text = VIDEO_STATUS_TEXT.get(status, f"未知({status})")
+            status_text = video_status_text(status)
             if data.get("stepText"):
-                status_text = f"{status_text}（{data['stepText']}）"
+                status_text = t("status.with_step", status=status_text, step=data["stepText"])
             snapshot = {
                 "statusText": status_text,
                 "videoFileName": data.get("videoFileName"),
@@ -1821,152 +2410,17 @@ class TranslationClient:
                 snapshot["queueTotal"] = progress_info.get("totalTask")
                 snapshot["predictWaitSeconds"] = progress_info.get("predictWaitTime")
 
+            await _emit_progress(on_progress, live_percent(), live_line())
+
             key = _wait_key(snapshot)
             if record["lastKey"] is None:
                 record["lastKey"] = key
             elif key != record["lastKey"] and elapsed >= _WAIT_MIN_SECONDS:
                 return pending(elapsed, changed=True)
 
-            await asyncio.sleep(interval)
+            await heartbeat(interval)
             interval = min(interval + 2, 15)
 
 
     # ============ 结果下载 ============
 
-    async def download_video_result(
-        self,
-        order_no: str,
-        save_dir: Optional[str] = None,
-        items: Optional[list] = None,
-        wait: int = 20,
-    ) -> dict:
-        """把译制视频与字幕直接下到本机，替代把签名链接贴进对话
-
-        每次都现查详情拿地址，所以签发多久之前的链接、有没有过期都不影响。
-        小文件在这一次调用里就下完；超过 wait 秒还没完就带进度返回，让调用方
-        转述后用 get_download_status 继续跟——和 upload_file 一个路子。
-        """
-        import asyncio
-        import uuid
-
-        detail = await self.get_video_translate_detail(order_no)
-        if detail.get("code") not in ("200", 200):
-            return detail
-
-        data = detail.get("data") or {}
-        status = data.get("status")
-        if status != VIDEO_STATUS_DONE:
-            return {
-                "code": "400",
-                "msg": (
-                    f"任务当前是「{VIDEO_STATUS_TEXT.get(status, status)}」，还没有产出可下。"
-                    + ("请先用 wait_for_video_translation 等它完成。"
-                       if status in (0, 1)
-                       else "该任务不会再有产出了，不要重复下载。")
-                ),
-                "data": {"orderNo": order_no, "status": status},
-            }
-
-        wanted = list(items) if items else list(DOWNLOAD_ITEMS_DEFAULT)
-        unknown = [k for k in wanted if k not in DOWNLOAD_ITEMS]
-        if unknown:
-            return {
-                "code": "400",
-                "msg": (
-                    f"items 里有不认识的值 {unknown}，可选：{list(DOWNLOAD_ITEMS)}。"
-                ),
-            }
-
-        # 落地目录：默认下载到用户的下载目录，那是他们会去找文件的地方
-        save_dir = os.path.abspath(os.path.expanduser(
-            save_dir or (os.path.join(os.path.expanduser("~"), "Downloads")
-                         if os.path.isdir(os.path.join(os.path.expanduser("~"), "Downloads"))
-                         else os.path.expanduser("~"))
-        ))
-        try:
-            os.makedirs(save_dir, exist_ok=True)
-        except OSError as e:
-            return {
-                "code": "400",
-                "msg": (
-                    f"服务端建不了目录 {save_dir}（{e}）。换一个 save_dir 重试；"
-                    "如果 MCP 服务部署在另一台机器上，本工具落的盘也是那台机器的，"
-                    "这种情况请改用返回里的签名链接。"
-                ),
-            }
-
-        stem = _safe_stem(data.get("videoFileName"))
-        src_lang = data.get("sourceLanguage") or "src"
-        tgt_lang = data.get("targetLanguage") or "target"
-        video_ext = os.path.splitext(data.get("videoFileName") or "")[1] or ".mp4"
-        names = {
-            "video": f"{stem}.{tgt_lang}{video_ext}",
-            "target_subtitles": f"{stem}.{tgt_lang}.srt",
-            "source_subtitles": f"{stem}.{src_lang}.srt",
-            "source_video": f"{stem}.source{video_ext}",
-        }
-
-        entries, missing = [], []
-        for key in wanted:
-            field, label = DOWNLOAD_ITEMS[key]
-            url = data.get(field)
-            if not url:
-                missing.append(label)
-                continue
-            entries.append({
-                "kind": key,
-                "label": label,
-                "url": url,
-                "path": _unique_path(os.path.join(save_dir, names[key])),
-                "totalBytes": 0,
-                "downloadedBytes": 0,
-                "status": "pending",
-                "error": "",
-            })
-
-        if not entries:
-            return {
-                "code": "500",
-                "msg": f"这个任务没有可下载的产物（缺：{'、'.join(missing)}）。",
-                "data": {"orderNo": order_no},
-            }
-
-        download_id = uuid.uuid4().hex[:12]
-        state = {
-            "orderNo": order_no,
-            "saveDir": save_dir,
-            "outputNote": data.get("outputNote") or "",
-            "items": entries,
-            "status": "downloading",
-            "startedAt": time.monotonic(),
-            "finishedAt": None,
-        }
-        _DOWNLOADS[download_id] = state
-        _prune_downloads()
-
-        # 丢进线程，别让下载期间整个事件循环冻住；task 存进 state 免得被 GC 提前回收
-        state["_task"] = asyncio.create_task(asyncio.to_thread(_fetch_files, state))
-
-        result = await self._await_download(download_id, wait)
-        if missing:
-            result.setdefault("data", {})["skipped"] = missing
-        return result
-
-    async def get_download_status(self, download_id: str, wait: int = 8) -> dict:
-        """查询 download_video_result 发起的下载进度，未完成时最多等 wait 秒再返回"""
-        return await self._await_download(download_id, wait)
-
-    @staticmethod
-    async def _await_download(download_id: str, wait: int) -> dict:
-        """等一小会儿再给快照，免得调用方空转着反复查"""
-        import asyncio
-
-        state = _DOWNLOADS.get(download_id)
-        if state:
-            # 先让出一次：wait=0 时下面的循环一次都不进，下载线程连启动的机会
-            # 都没有，快照永远停在 0%
-            await asyncio.sleep(0)
-            deadline = time.monotonic() + max(0, wait)
-            while state["status"] == "downloading" and time.monotonic() < deadline:
-                await asyncio.sleep(0.3)
-        return _download_snapshot(download_id)
