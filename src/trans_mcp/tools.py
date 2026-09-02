@@ -14,6 +14,44 @@ from .client import TranslationClient, _build_video_task_param
 
 
 
+VOICE_ROLE_CHOICES = ("No", "clone")
+
+
+async def _reject(msg: str) -> dict:
+    """参数校验不过就返回一条模型看得懂的错误，而不是抛异常——
+    让它回去问用户，而不是把栈信息糊给用户看。"""
+    return {"code": "400", "msg": msg, "data": None}
+
+
+def _submit_video_translate(client, args):
+    """translate_video 会真实扣费，所以确认与配音选择在这里硬拦，
+    光靠工具描述里的祈使句拦不住（实测模型会试算完直接提交）。"""
+    voice_role = args.get("voice_role")
+    if voice_role not in VOICE_ROLE_CHOICES:
+        return _reject(
+            "voice_role 必须显式传 No 或 clone，不能省略。请先问用户是否开启同声翻译"
+            "（配音）：No=不配音、保留原声只做字幕；clone=克隆原说话人音色配音，"
+            "且 subtitle_type≠0 时额度翻倍。拿到用户的选择后再重新调用本工具。"
+        )
+    if args.get("user_confirmed") is not True:
+        return _reject(
+            "本次提交会真实扣减额度，必须先用 calculate_video_translation_quota 试算、"
+            "把预计消耗和配音选项一并告诉用户并得到明确同意，再带 user_confirmed=true "
+            "重新调用。请不要替用户做决定。"
+        )
+    return client.submit_video_translate(
+        args["source_language"],
+        args["target_language"],
+        args["source_file_object_key"],
+        args["video_file_name"],
+        _build_video_task_param(
+            voice_role,
+            args.get("subtitle_type", 1),
+            args.get("video_task_param"),
+        ),
+    )
+
+
 def _to_json(result) -> str:
     """工具结果统一序列化为 JSON（中文不转义），避免输出 Python repr"""
     import json
@@ -219,7 +257,7 @@ TOOLS = [
     ),
     Tool(
         name="translate_video",
-        description="提交视频翻译任务。⚠️ 本工具会真实扣减账户额度并计入调用次数，提交前必须先用 calculate_video_translation_quota 试算、把预计消耗告诉用户并得到确认，不要自作主张提交。voice_role 与 subtitle_type 决定这次翻译到底做什么：两者都关（voice_role 传 No 且 subtitle_type=0）等于既不配音也不嵌字幕，产出的视频和原片没有区别，但一样扣费——上游不拦这个组合，请在提交前自行拦下并问用户。返回 data.videoTranslateOrderNo 是后续所有查询用的订单号。限制：免费用户单个视频最长 10 分钟、每月累计 10 分钟、单文件 200MB、同时只能有 1 个进行中的任务（Pro 为 60 分钟/1024MB/2 个）。若 target_language 传 ar（阿拉伯语）且账号不是付费会员，上游要求人机验证 token，外部调用无法提供，会直接失败。",
+        description="提交视频翻译任务。⚠️ 本工具会真实扣减账户额度并计入调用次数。提交前必须做完两件事：(1) 用 calculate_video_translation_quota 试算并把预计消耗告诉用户；(2) 问用户是否开启同声翻译（配音），由用户选 No 或 clone。两件事都做完、拿到用户明确同意后，才带 voice_role 和 user_confirmed=true 调用本工具——这两个参数都是必填，缺任何一个都会被直接拒绝，不会提交也不会扣费。voice_role 与 subtitle_type 决定这次翻译到底做什么：两者都关（voice_role 传 No 且 subtitle_type=0）等于既不配音也不嵌字幕，产出的视频和原片没有区别，但一样扣费——上游不拦这个组合，请在提交前自行拦下并问用户。返回 data.videoTranslateOrderNo 是后续所有查询用的订单号。限制：免费用户单个视频最长 10 分钟、每月累计 10 分钟、单文件 200MB、同时只能有 1 个进行中的任务（Pro 为 60 分钟/1024MB/2 个）。若 target_language 传 ar（阿拉伯语）且账号不是付费会员，上游要求人机验证 token，外部调用无法提供，会直接失败。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -247,12 +285,19 @@ TOOLS = [
                     "type": "integer",
                     "description": "0=不嵌入字幕, 1=翻译字幕(默认), 2=原始字幕, 3=翻译+原始字幕"
                 },
+                "user_confirmed": {
+                    "type": "boolean",
+                    "description": "用户已经看到试算额度、并明确选择了是否开启同声翻译（配音）后才传 true。没问过就传 true 属于替用户做决定，会导致误扣额度。为空或 false 时本工具直接拒绝提交。"
+                },
                 "video_task_param": {
                     "type": "object",
                     "description": "完整的生成参数，覆盖 voice_role / subtitle_type 这两个快捷参数。配音：voiceRate 语速、volume 音量、pitch 音调（均为 +0% / +0Hz 这类字符串）、voiceAutorate 语音自动变速、videoAutorate 视频自动变速（默认都 true）。字幕样式：fontsize 字号(默认14)、fontname 字体、fontcolor 颜色(#RRGGBB)、fontbold 加粗、subtitlePosX 水平位置 5-95(50居中)、subtitlePosY 底边距 0-90、fontbordercolor 描边色、outline 描边宽 0-10(0关闭)、shadow 阴影 0-10(0关闭)、backgroundcolor 背景框色、borderStyle 1普通描边/3逐行矩形背景框。不传的字段走服务端默认值。注意服务端对这些字段一个都不校验，填了非法值不会报错、会照常扣费然后在生成阶段失败，不确定就别传。"
                 }
             },
-            "required": ["source_language", "target_language", "source_file_object_key", "video_file_name"]
+            "required": [
+                "source_language", "target_language", "source_file_object_key",
+                "video_file_name", "voice_role", "user_confirmed"
+            ]
         }
     ),
     Tool(
@@ -293,7 +338,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_video_translation",
-        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 60）。视频任务通常要几分钟。finished=false 时请把返回 msg 里那行进度告诉用户——不管 changedSinceLastCall 是 true 还是 false 都要说，和上次一样也照样说一遍，不要沉默跳过，然后再次调用本工具继续等待，任务不会因此中断。完成时返回 translatedVideoUrl（译制视频）、targetSubtitlesUrl（译文字幕）等地址，均为临时签名地址、60 分钟有效，必须原样完整交给用户。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
+        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 60）。视频任务通常要几分钟。finished=false 时请把返回 msg 里那行进度告诉用户——不管 changedSinceLastCall 是 true 还是 false 都要说，和上次一样也照样说一遍，不要沉默跳过，然后再次调用本工具继续等待，任务不会因此中断。完成时返回 translatedVideoUrl（译制视频）、targetSubtitlesUrl（译文字幕）等地址，均为临时签名地址、60 分钟有效，必须原样完整交给用户。描述产物时请原样照抄 outputNote（例如「未配音（保留原声），已嵌入译文字幕」），不要凭之前传过的参数自己推断有没有配音。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -447,17 +492,7 @@ def build_tool_handlers(client: TranslationClient):
         ),
         "get_document_translation_by_batch": lambda args: client.search_translate_file_by_batch_no(args["batch_no"]),
         "upload_video": lambda args: client.video_batch_presigned_upload_url(args["file_name_list"]),
-        "translate_video": lambda args: client.submit_video_translate(
-            args["source_language"],
-            args["target_language"],
-            args["source_file_object_key"],
-            args["video_file_name"],
-            _build_video_task_param(
-                args.get("voice_role", "No"),
-                args.get("subtitle_type", 1),
-                args.get("video_task_param"),
-            )
-        ),
+        "translate_video": lambda args: _submit_video_translate(client, args),
         "calculate_video_translation_quota": lambda args: client.video_translate_quota_calculate(
             args["video_duration"],
             args.get("voice_role", "No"),

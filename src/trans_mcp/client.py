@@ -67,6 +67,15 @@ VIDEO_STATUS_DONE = 2
 VIDEO_STATUS_TERMINAL = (2, 3, 4)
 VIDEO_STEP_TEXT = {1: "语音识别", 2: "字幕翻译", 3: "语音生成"}
 VIDEO_STEP_STATUS_TEXT = {0: "未开始", 1: "进行中", 2: "完成", 3: "失败"}
+
+# 产出到底做了什么，只有 paramJson 说了算。模型隔了十几轮再回忆自己传过什么，
+# 很容易把「不配音+嵌字幕」说成「英文配音」，所以这里直接还原成一句人话。
+VIDEO_SUBTITLE_TEXT = {
+    0: "未嵌入字幕",
+    1: "已嵌入译文字幕",
+    2: "已嵌入原文字幕",
+    3: "已嵌入译文+原文字幕",
+}
 VIDEO_SUBTITLE_TYPE = {
     0: "不嵌入字幕",
     1: "翻译字幕",
@@ -141,7 +150,26 @@ def _annotate_video_status(record: dict) -> dict:
         record["stepStatusText"] = VIDEO_STEP_STATUS_TEXT.get(
             record["stepStatus"], f"未知({record['stepStatus']})"
         )
+    note = _output_note(record)
+    if note:
+        record["outputNote"] = note
     return record
+
+
+def _output_note(record: dict) -> str:
+    """从 paramJson 还原本次产出：有没有配音、嵌了什么字幕"""
+    try:
+        param = json.loads(record.get("paramJson") or "{}")
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(param, dict):
+        return ""
+    voice = param.get("voiceRole")
+    if voice is None:
+        return ""
+    voice_text = "未配音（保留原声）" if voice == "No" else f"已配音（{voice}）"
+    subtitle_text = VIDEO_SUBTITLE_TEXT.get(param.get("subtitleType"), "字幕设置未知")
+    return f"{voice_text}，{subtitle_text}"
 
 
 def _available_variants(data: dict) -> dict:
@@ -1448,8 +1476,10 @@ class TranslationClient:
                         "sourceSubtitlesUrl": data.get("sourceSubtitlesUrl"),
                         "usedFreeQuota": data.get("freeTranslateQuota"),
                         "usedWalletQuota": data.get("walletTranslateQuota"),
+                        "outputNote": data.get("outputNote"),
                         "downloadNote": (
                             "translatedVideoUrl 是译制后的视频，targetSubtitlesUrl 是译文字幕。"
+                            "描述这个视频时请原样照抄 outputNote，不要自己推断有没有配音。"
                             + _URL_VERBATIM_NOTE
                             + _expiry_note(target)
                             + "要人工校对字幕再重新生成，用 get_video_subtitles 取字幕、"
