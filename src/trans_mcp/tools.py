@@ -1,5 +1,6 @@
 """MCP 工具定义"""
 
+import contextvars
 import sys
 from mcp.server import Server
 from mcp.types import (
@@ -10,11 +11,91 @@ from mcp.types import (
     CallToolRequestParams,
     PaginatedRequestParams,
 )
-from .client import TranslationClient, _build_video_task_param
+from .client import TranslationClient, _build_video_task_param, recent_video_submit
 
 
 
 VOICE_ROLE_CHOICES = ("No", "clone")
+
+# 当前这次 tools/call 的 ServerRequestContext。工具处理器签名里只有 args，拿不到
+# 会话，而 elicitation（服务端反过来向用户提问）必须走 ctx.session。stdio 模式在
+# handle_call_tool 里塞进来；HTTP 模式是纯请求/响应，没有回传通道，这里恒为 None。
+_REQUEST_CTX: contextvars.ContextVar = contextvars.ContextVar("trans_mcp_request_ctx", default=None)
+
+
+async def _probe_elicitation(args) -> dict:
+    """自检：这个客户端到底吃不吃 elicitation。不提交任务、不扣额度。
+
+    user_confirmed / retry_confirmed 这类布尔量永远是模型自己填的，服务端无法
+    验证背后有没有真实问过用户。elicitation 是唯一能让服务端直接问到人的通道，
+    但它要求客户端声明能力、且传输层有回传通道——两者都得实测。
+    """
+    ctx = _REQUEST_CTX.get()
+    if ctx is None:
+        return {"code": "200", "data": {
+            "transport": "http",
+            "backChannel": False,
+            "elicitationUsable": False,
+            "verdict": (
+                "本次部署走 HTTP 请求/响应：每个 JSON-RPC 请求返回一次 json_response，"
+                "服务端没有向客户端发起请求的通道，elicitation 在这种传输上根本发不出去，"
+                "与客户端支不支持无关。要用得先把 HTTP 传输改成真正的 Streamable HTTP"
+                "（SSE 响应体 + 会话 id + 客户端回 POST），或者改走 stdio。"
+            ),
+        }}
+
+    session = ctx.session
+    params = getattr(session, "client_params", None)
+    caps = getattr(params, "capabilities", None)
+    # 2.x 的 pydantic 模型走蛇形字段名，别照着协议里的 clientInfo 取
+    info = getattr(params, "client_info", None)
+    declared = bool(caps and getattr(caps, "elicitation", None))
+    out = {
+        "transport": "stdio",
+        "backChannel": True,
+        "clientInfo": info.model_dump(exclude_none=True) if info else None,
+        "protocolVersion": getattr(session, "protocol_version", None),
+        "clientCapabilities": caps.model_dump(exclude_none=True) if caps else None,
+        "elicitationDeclared": declared,
+    }
+    if not declared:
+        out["elicitationUsable"] = False
+        out["verdict"] = (
+            "客户端在 initialize 里没有声明 elicitation 能力，服务端无法向它发起提问，"
+            "只能退回现在这套参数守卫（user_confirmed / retry_confirmed 自我认证）。"
+        )
+        return {"code": "200", "data": out}
+
+    try:
+        result = await session.elicit_form(
+            message=(
+                "[trans-mcp 自检] 这条是服务端主动发起的提问，不会提交任何任务、不扣额度。"
+                "请随便选一个，用来验证回答能不能传回服务端："
+            ),
+            requested_schema={
+                "type": "object",
+                "properties": {
+                    "voice": {
+                        "type": "string",
+                        "title": "配音",
+                        "enum": ["No", "clone"],
+                        "description": "No=不配音只做字幕；clone=克隆原声配音（真实场景下额度翻倍）",
+                    }
+                },
+                "required": ["voice"],
+            },
+        )
+        out["elicitResult"] = result.model_dump(exclude_none=True)
+        out["elicitationUsable"] = True
+        out["verdict"] = (
+            "elicitation 可用：上面 elicitResult 里的选择是用户本人给的，"
+            "可以用它替掉 translate_video 的 user_confirmed 自我认证。"
+        )
+    except Exception as e:
+        out["elicitationUsable"] = False
+        out["error"] = f"{type(e).__name__}: {e}"
+        out["verdict"] = "客户端声明了 elicitation，但真发起时失败了（见 error）。"
+    return {"code": "200", "data": out}
 
 
 async def _reject(msg: str) -> dict:
@@ -23,23 +104,41 @@ async def _reject(msg: str) -> dict:
     return {"code": "400", "msg": msg, "data": None}
 
 
-def _submit_video_translate(client, args):
-    """translate_video 会真实扣费，所以确认与配音选择在这里硬拦，
-    光靠工具描述里的祈使句拦不住（实测模型会试算完直接提交）。"""
+async def _submit_video_translate(client, args):
+    """translate_video 会真实扣费，所以确认、配音选择、重复提交都在这里硬拦，
+    光靠工具描述里的祈使句拦不住（实测模型会试算完直接提交，任务失败后也会
+    自己换个参数直接重提）。"""
     voice_role = args.get("voice_role")
     if voice_role not in VOICE_ROLE_CHOICES:
-        return _reject(
+        return await _reject(
             "voice_role 必须显式传 No 或 clone，不能省略。请先问用户是否开启同声翻译"
             "（配音）：No=不配音、保留原声只做字幕；clone=克隆原说话人音色配音，"
             "且 subtitle_type≠0 时额度翻倍。拿到用户的选择后再重新调用本工具。"
         )
     if args.get("user_confirmed") is not True:
-        return _reject(
+        return await _reject(
             "本次提交会真实扣减额度，必须先用 calculate_video_translation_quota 试算、"
             "把预计消耗和配音选项一并告诉用户并得到明确同意，再带 user_confirmed=true "
             "重新调用。请不要替用户做决定。"
         )
-    return client.submit_video_translate(
+
+    # 同一份文件、同一目标语言短时间内再提就是重做，不管上一单是失败、取消还是
+    # 想换参数——都会再扣一次费。必须显式认领上一单的单号才放行。
+    prev = recent_video_submit(args["source_file_object_key"], args["target_language"])
+    if prev and prev.get("orderNo") and (
+        args.get("retry_confirmed") is not True
+        or args.get("retry_of_order_no") != prev["orderNo"]
+    ):
+        return await _reject(
+            f"这份文件刚提交过一单（{prev['orderNo']}，目标语言 {args['target_language']}，"
+            f"扣了 {prev['quota']} 额度）。再提交一次是新任务、会再扣一次费——上一单失败了、"
+            "取消了、或者你想换个参数重做，都一样要扣。请先把上一单的结果或失败原因告诉用户，"
+            "问清楚要不要重做；用户同意后带 "
+            f"retry_of_order_no=\"{prev['orderNo']}\" 和 retry_confirmed=true 重新调用本工具。"
+            "不要自己决定重提。"
+        )
+
+    return await client.submit_video_translate(
         args["source_language"],
         args["target_language"],
         args["source_file_object_key"],
@@ -257,7 +356,7 @@ TOOLS = [
     ),
     Tool(
         name="translate_video",
-        description="提交视频翻译任务。⚠️ 本工具会真实扣减账户额度并计入调用次数。提交前必须做完两件事：(1) 用 calculate_video_translation_quota 试算并把预计消耗告诉用户；(2) 问用户是否开启同声翻译（配音），由用户选 No 或 clone。两件事都做完、拿到用户明确同意后，才带 voice_role 和 user_confirmed=true 调用本工具——这两个参数都是必填，缺任何一个都会被直接拒绝，不会提交也不会扣费。voice_role 与 subtitle_type 决定这次翻译到底做什么：两者都关（voice_role 传 No 且 subtitle_type=0）等于既不配音也不嵌字幕，产出的视频和原片没有区别，但一样扣费——上游不拦这个组合，请在提交前自行拦下并问用户。返回 data.videoTranslateOrderNo 是后续所有查询用的订单号。限制：免费用户单个视频最长 10 分钟、每月累计 10 分钟、单文件 200MB、同时只能有 1 个进行中的任务（Pro 为 60 分钟/1024MB/2 个）。若 target_language 传 ar（阿拉伯语）且账号不是付费会员，上游要求人机验证 token，外部调用无法提供，会直接失败。",
+        description="提交视频翻译任务。⚠️ 本工具会真实扣减账户额度并计入调用次数。提交前必须做完两件事：(1) 用 calculate_video_translation_quota 试算并把预计消耗告诉用户；(2) 问用户是否开启同声翻译（配音），由用户选 No 或 clone。两件事都做完、拿到用户明确同意后，才带 voice_role 和 user_confirmed=true 调用本工具——这两个参数都是必填，缺任何一个都会被直接拒绝，不会提交也不会扣费。voice_role 与 subtitle_type 决定这次翻译到底做什么：两者都关（voice_role 传 No 且 subtitle_type=0）等于既不配音也不嵌字幕，产出的视频和原片没有区别，但一样扣费——上游不拦这个组合，请在提交前自行拦下并问用户。返回 data.videoTranslateOrderNo 是后续所有查询用的订单号。同一份文件、同一目标语言 30 分钟内再次提交会被直接拒绝，除非带上 retry_of_order_no（上一单单号）和 retry_confirmed=true——任务失败后不要自己改个参数就重提，先把失败原因告诉用户、问过再说。限制：免费用户单个视频最长 10 分钟、每月累计 10 分钟、单文件 200MB、同时只能有 1 个进行中的任务（Pro 为 60 分钟/1024MB/2 个）。若 target_language 传 ar（阿拉伯语）且账号不是付费会员，上游要求人机验证 token，外部调用无法提供，会直接失败。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -292,6 +391,14 @@ TOOLS = [
                 "video_task_param": {
                     "type": "object",
                     "description": "完整的生成参数，覆盖 voice_role / subtitle_type 这两个快捷参数。配音：voiceRate 语速、volume 音量、pitch 音调（均为 +0% / +0Hz 这类字符串）、voiceAutorate 语音自动变速、videoAutorate 视频自动变速（默认都 true）。字幕样式：fontsize 字号(默认14)、fontname 字体、fontcolor 颜色(#RRGGBB)、fontbold 加粗、subtitlePosX 水平位置 5-95(50居中)、subtitlePosY 底边距 0-90、fontbordercolor 描边色、outline 描边宽 0-10(0关闭)、shadow 阴影 0-10(0关闭)、backgroundcolor 背景框色、borderStyle 1普通描边/3逐行矩形背景框。不传的字段走服务端默认值。注意服务端对这些字段一个都不校验，填了非法值不会报错、会照常扣费然后在生成阶段失败，不确定就别传。"
+                },
+                "retry_of_order_no": {
+                    "type": "string",
+                    "description": "重做时必填：上一单的 videoTranslateOrderNo。同一份文件、同一目标语言 30 分钟内再次提交会被拒绝，除非带上这个单号并把 retry_confirmed 置 true。"
+                },
+                "retry_confirmed": {
+                    "type": "boolean",
+                    "description": "重做时必填 true：表示已经把上一单的结果或失败原因告诉用户、并得到用户明确同意再扣一次费。不要自己填。"
                 }
             },
             "required": [
@@ -302,13 +409,13 @@ TOOLS = [
     ),
     Tool(
         name="calculate_video_translation_quota",
-        description="试算视频翻译要消耗多少额度，不扣费。提交 translate_video 前应当先调这个并把结果告诉用户。计费规则：按 30 秒为一个计费单位向上取整，每单位 4 额度；voice_role 为 clone 且 subtitle_type≠0 时额度翻倍（实测 10 分钟视频：不配音 80 额度，开克隆配音 160 额度）。",
+        description="试算视频翻译要消耗多少额度，不扣费。提交 translate_video 前应当先调这个并把结果告诉用户。video_duration 必须是从文件里真实读出来的时长（ffprobe 等），不能按文件大小猜——服务端核实不了这个输入，猜错就等于给用户报了个假预算。计费规则：按 30 秒为一个计费单位向上取整，每单位 4 额度；voice_role 为 clone 且 subtitle_type≠0 时额度翻倍（实测 10 分钟视频：不配音 80 额度，开克隆配音 160 额度）。",
         inputSchema={
             "type": "object",
             "properties": {
                 "video_duration": {
                     "type": "number",
-                    "description": "视频时长，单位是**毫秒**（不是秒）。例如 2 分 5 秒要传 125000。传成秒会让试算额度远低于实际扣费。"
+                    "description": "视频时长，单位是**毫秒**（不是秒）。例如 2 分 5 秒要传 125000，传成秒会让试算额度远低于实际扣费。必须是文件的真实时长：用 ffprobe（ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 <文件>，得到的是秒，乘 1000）或其他媒体信息工具读出来。严禁按文件大小估算——码率差异极大，实测有把 21 秒的 4.8MB 视频猜成 5 分钟的，报给用户的预算因此差了十倍。读不到真实时长就别试算，先告诉用户你读不到。"
                 },
                 "voice_role": {
                     "type": "string",
@@ -338,7 +445,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_video_translation",
-        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 60）。视频任务通常要几分钟。finished=false 时请把返回 msg 里那行进度告诉用户——不管 changedSinceLastCall 是 true 还是 false 都要说，和上次一样也照样说一遍，不要沉默跳过，然后再次调用本工具继续等待，任务不会因此中断。完成时返回 translatedVideoUrl（译制视频）、targetSubtitlesUrl（译文字幕）等地址，均为临时签名地址、60 分钟有效，必须原样完整交给用户。描述产物时请原样照抄 outputNote（例如「未配音（保留原声），已嵌入译文字幕」），不要凭之前传过的参数自己推断有没有配音。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
+        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 60）。视频任务通常要几分钟。finished=false 时请把返回 msg 里那行进度告诉用户——不管 changedSinceLastCall 是 true 还是 false 都要说，和上次一样也照样说一遍，不要沉默跳过，然后再次调用本工具继续等待，任务不会因此中断。完成后不要把返回里的签名链接贴给用户——那是几百字符的长链接，刷屏且容易被截断成 403，请接着调 download_video_result 把视频和字幕直接下到用户本机，最后只给本地路径。只有 HTTP 远程模式下没有该工具时，才退回给链接，并把问号后面的签名参数一字不改地给全；有效期以返回的 expiresAt / downloadNote 为准，不要按经验说成一小时。描述产物时请原样照抄 msg 和 outputNote 里那句产出说明（例如「未配音（保留原声），已嵌入译文字幕」），不要凭之前传过的参数自己推断有没有配音。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -355,8 +462,56 @@ TOOLS = [
         }
     ),
     Tool(
+        name="download_video_result",
+        description="把翻译好的视频和字幕直接下载到用户本机（仅 stdio 模式可用，写文件的是服务端进程）。任务完成后请优先用本工具收尾，不要把 translatedVideoUrl 那种几百字符的签名链接贴给用户——链接会刷屏、容易被截断成 403、用户还得自己复制粘贴，而本工具返回的是可以直接打开的本地路径。地址在下载前重新签发，所以之前的链接过没过期都不影响。默认下载译制视频 + 译文字幕 + 原文字幕，存到用户的下载目录。小文件通常本次调用就下完；大文件等满 wait 秒会先返回进度和 downloadId——请把进度转述给用户，再用 downloadId 调 get_download_status 继续跟进，下载在后台照常进行。完成后请把 files 里的路径逐行念给用户，并原样照抄 outputNote 描述产物。HTTP 远程模式下本工具不会出现在工具列表中，那种情况才用链接。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "order_no": {
+                    "type": "string",
+                    "description": "视频翻译订单号（videoTranslateOrderNo）"
+                },
+                "save_dir": {
+                    "type": "string",
+                    "description": "保存目录，不传则存到用户的下载目录（~/Downloads，没有就用 ~）。目录不存在会自动创建。"
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["video", "target_subtitles", "source_subtitles", "source_video"]
+                    },
+                    "description": "要下载哪些产物，默认 ['video','target_subtitles','source_subtitles']。source_video 是原片，用户本机通常已经有了，别默认下。"
+                },
+                "wait": {
+                    "type": "integer",
+                    "description": "本次最多等待的秒数，默认 20。到点没下完会返回当前进度而非报错。"
+                }
+            },
+            "required": ["order_no"]
+        }
+    ),
+    Tool(
+        name="get_download_status",
+        description="查询 download_video_result 发起的下载进度（仅 stdio 模式可用）。返回 status：downloading=仍在下（附百分比、已下字节、预计剩余时间，请转述给用户后再调一次继续跟进）、success=全部完成（把 files 里的本地路径逐行给用户）、partial/failed=部分或全部失败（files 里带 error，成功的那几个仍然可用）。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "download_id": {
+                    "type": "string",
+                    "description": "download_video_result 返回的 downloadId"
+                },
+                "wait": {
+                    "type": "integer",
+                    "description": "本次最多等待的秒数，默认 8。到点仍在下载就返回当前进度。"
+                }
+            },
+            "required": ["download_id"]
+        }
+    ),
+    Tool(
         name="list_video_translations",
-        description="分页查询视频翻译任务列表，只返回最近 15 天的记录。status 过滤值：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消。完成的记录里 targetFileUrl 是译制视频、targetSubtitlesUrl 是译文字幕，都是临时签名地址、60 分钟有效，必须原样完整交给用户，不能截断签名参数。",
+        description="分页查询视频翻译任务列表，只返回最近 15 天的记录。status 过滤值：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消。完成的记录里 targetFileUrl 是译制视频、targetSubtitlesUrl 是译文字幕，都是临时签名地址，有效期以记录里的 expiresAt 为准（别按经验说成一小时）。要交付给用户请优先用 download_video_result 下到本机；确实要给链接就必须原样完整给出，不能截断签名参数。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -409,7 +564,7 @@ TOOLS = [
     ),
     Tool(
         name="get_video_subtitles",
-        description="获取视频的原文与译文字幕下载地址。任务 status 必须是 2（成功），否则返回 31008「文件翻译中」。若该任务已有改写记录，返回的是最近一次改写后的字幕。地址 60 分钟有效。",
+        description="获取视频的原文与译文字幕下载地址。任务 status 必须是 2（成功），否则返回 31008「文件翻译中」。若该任务已有改写记录，返回的是最近一次改写后的字幕。地址有有效期，以返回里的说明为准；要落到本机用 download_video_result。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -446,6 +601,11 @@ TOOLS = [
             },
             "required": ["order_no", "source_subtitles_txt", "target_subtitles_txt"]
         }
+    ),
+    Tool(
+        name="probe_elicitation",
+        description="连通性自检工具，不翻译、不提交任务、不扣任何额度。用来验证服务端能否通过 MCP elicitation 直接向用户提问（而不是靠模型自己填 user_confirmed 声称问过了）。调用后会返回客户端声明的能力，并在支持时真的弹一次提问。只在排查这个问题时调用，正常翻译流程不要调。",
+        inputSchema={"type": "object", "properties": {}}
     ),
     Tool(
         name="get_video_rewrite_status",
@@ -508,6 +668,15 @@ def build_tool_handlers(client: TranslationClient):
             args.get("status")
         ),
         "cancel_video_translation": lambda args: client.cancel_video_translate(args["order_no"]),
+        "download_video_result": lambda args: client.download_video_result(
+            args["order_no"],
+            args.get("save_dir"),
+            args.get("items"),
+            args.get("wait", 20),
+        ),
+        "get_download_status": lambda args: client.get_download_status(
+            args["download_id"], args.get("wait", 8)
+        ),
         "get_video_subtitles": lambda args: client.get_video_subtitles(args["order_no"]),
         "rewrite_video_subtitles": lambda args: client.submit_video_rewrite(
             args["order_no"],
@@ -516,6 +685,7 @@ def build_tool_handlers(client: TranslationClient):
             args.get("video_task_param"),
         ),
         "get_video_rewrite_status": lambda args: client.get_video_rewrite_detail(args["order_no"]),
+        "probe_elicitation": _probe_elicitation,
         "wait_for_translation": lambda args: client.wait_for_translation(args["order_no"], args.get("timeout", 45)),
     }
 
@@ -538,6 +708,7 @@ def register_tools(server: Server, client: TranslationClient):
                 content=[TextContent(type="text", text=f"未知工具: {tool_name}")]
             )
         
+        token = _REQUEST_CTX.set(ctx)
         try:
             result = await TOOL_HANDLERS[tool_name](args)
             return CallToolResult(
@@ -549,6 +720,8 @@ def register_tools(server: Server, client: TranslationClient):
                 content=[TextContent(type="text", text=f"错误: {str(e)}")],
                 isError=True
             )
+        finally:
+            _REQUEST_CTX.reset(token)
     
     # add_request_handler 要的是 params 模型（RequestParams 的子类），
     # 不是 ListToolsRequest / CallToolRequest 这种 Request 模型。

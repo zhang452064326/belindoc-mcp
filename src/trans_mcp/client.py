@@ -1,6 +1,7 @@
 """API 客户端"""
 
 import json
+import os
 import re
 import sys
 import time
@@ -201,6 +202,18 @@ def _url_expiry(url: str):
     return max(0, int(match.group(1)) - time.time())
 
 
+def _expires_at(url: str) -> str:
+    """签名链接的绝对过期时刻。相对时长在对话里会腐坏：模型说完「还有 60 分钟」，
+    用户过几分钟才读到，转发给同事时更久，最后照着那个数去下载已经过期了。
+    绝对时间点不会腐坏，所以两个都给，让调用方念时间点。"""
+    remaining = _url_expiry(url)
+    if remaining is None:
+        return ""
+    at = time.localtime(time.time() + remaining)
+    fmt = "%H:%M" if at.tm_yday == time.localtime().tm_yday else "%m-%d %H:%M"
+    return time.strftime(fmt, at)
+
+
 def _expiry_note(url: str) -> str:
     """把真实有效期写出来。只说一句「有有效期」的话，调用方会自己编一个
     「约 1 小时」——实测只有 11 分钟，用户照着那个数去下载就已经过期了。"""
@@ -210,8 +223,9 @@ def _expiry_note(url: str) -> str:
     if remaining <= 0:
         return "链接已过期，请重新调用本工具取新的。"
     return (
-        f"链接还有 {_format_duration(remaining)}过期，请提醒用户尽快下载"
-        "（有效期就是这个数，不要按经验说成一小时）；过期后重新调用本工具取新的。"
+        f"链接在 {_expires_at(url)}（服务端本地时间）过期，此刻还剩 "
+        f"{_format_duration(remaining)}。请把这个时间点告诉用户，别只说「尽快下载」，"
+        "也别按经验说成一小时；过期后重新调用本工具取新的。"
     )
 
 
@@ -521,11 +535,216 @@ def _upload_snapshot(upload_id: str) -> dict:
     return {"code": "500", "data": snapshot, "msg": f"上传失败: {snapshot['error']}"}
 
 
+# ============ 重复提交拦截 ============
+# 提交视频翻译是真扣费的。实测模型在任务失败后会自己换个参数直接重提，返回里
+# 「问过用户之后再决定是否重新提交」那句祈使句拦不住它——和提交前的确认是同一
+# 种失效方式，所以同样得在服务端硬拦。按 (objectKey, 目标语言) 记账：窗口内再
+# 提必须显式带上一单的单号，逼调用方先把上一单的结果说清楚。
+_VIDEO_SUBMITS: dict[tuple, dict] = {}
+# 同一份文件隔多久之后再提就不算重复了
+_VIDEO_SUBMIT_WINDOW = 30 * 60
+_VIDEO_SUBMIT_KEEP = 50
+
+
+def recent_video_submit(object_key: str, target_language: str):
+    """窗口内是否已经为同一份文件、同一目标语言提交过。顺手清掉过期记录。"""
+    now = time.time()
+    for key, rec in list(_VIDEO_SUBMITS.items()):
+        if now - rec["at"] > _VIDEO_SUBMIT_WINDOW:
+            _VIDEO_SUBMITS.pop(key, None)
+    return _VIDEO_SUBMITS.get((object_key or "", target_language or ""))
+
+
+def _record_video_submit(object_key: str, target_language: str, data: dict) -> None:
+    data = data or {}
+    if len(_VIDEO_SUBMITS) > _VIDEO_SUBMIT_KEEP:
+        for key in list(_VIDEO_SUBMITS)[: len(_VIDEO_SUBMITS) - _VIDEO_SUBMIT_KEEP]:
+            _VIDEO_SUBMITS.pop(key, None)
+    _VIDEO_SUBMITS[(object_key or "", target_language or "")] = {
+        "orderNo": data.get("videoTranslateOrderNo"),
+        "quota": (data.get("freeTranslateQuota") or 0) + (data.get("walletTranslateQuota") or 0),
+        "at": time.time(),
+    }
+
+
+# ============ 结果下载（仅同机部署有意义） ============
+# 译制视频和字幕都是几百字符的签名长链接。把它们贴进对话是最糟的收尾：刷屏、
+# 容易被截断成 403、用户还得手工复制。服务端和用户同机时（stdio 模式）完全可以
+# 自己下下来，把收尾变成一行能直接双击打开的本地路径。
+_DOWNLOADS: dict[str, dict] = {}
+_DOWNLOAD_KEEP = 20
+# 还没实测出速度时用来估算剩余时间的保守带宽，只为给个量级
+_ASSUMED_DOWNLOAD_BPS = 4 * 1024 * 1024
+# 想下哪些产物。默认不含原片——那份用户本机上就有，白占带宽。
+DOWNLOAD_ITEMS = {
+    "video": ("targetFileUrl", "译制视频"),
+    "target_subtitles": ("targetSubtitlesUrl", "译文字幕"),
+    "source_subtitles": ("sourceSubtitlesUrl", "原文字幕"),
+    "source_video": ("sourceFileUrl", "原始视频"),
+}
+DOWNLOAD_ITEMS_DEFAULT = ("video", "target_subtitles", "source_subtitles")
+
+
+def _safe_stem(name: str) -> str:
+    """用原文件名做落地文件名，但先去掉路径分隔符之类的危险字符"""
+    stem = os.path.splitext(os.path.basename(name or ""))[0]
+    stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", stem).strip(" .")
+    return (stem or "video")[:80]
+
+
+def _unique_path(path: str) -> str:
+    """同名文件不覆盖——同一单下两次时，用户会以为第一份丢了"""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    i = 1
+    while os.path.exists(f"{stem} ({i}){ext}") and i < 1000:
+        i += 1
+    return f"{stem} ({i}){ext}"
+
+
+def _fetch_files(state: dict) -> None:
+    """顺序下完一组文件，由 asyncio.to_thread 丢到线程里跑，别占着事件循环
+
+    流式写盘，几百 MB 的视频不整个装进内存；先写 .part 再改名，中途失败或被
+    掐断时留不下一个看着像成功的半截文件。读写不设上限，只卡建连——和上传同理。
+    """
+    ok = 0
+    with httpx.Client(
+        timeout=httpx.Timeout(None, connect=30.0), follow_redirects=True
+    ) as c:
+        for item in state["items"]:
+            item["status"] = "downloading"
+            tmp = item["path"] + ".part"
+            try:
+                with c.stream("GET", item["url"]) as resp:
+                    if resp.status_code != 200:
+                        # S3/CloudFront 报错回的是 XML、被反代拦下时回的是整页
+                        # HTML。原样塞进 msg 会把几百字标签糊到用户脸上，只留
+                        # 去标签压空白后的头一句。
+                        body = re.sub(r"<[^>]+>", " ", resp.read()[:600].decode("utf-8", "replace"))
+                        body = re.sub(r"\s+", " ", body).strip()[:120]
+                        raise RuntimeError(f"HTTP {resp.status_code}: {body}")
+                    item["totalBytes"] = int(resp.headers.get("content-length") or 0)
+                    with open(tmp, "wb") as fh:
+                        for chunk in resp.iter_bytes(1024 * 1024):
+                            fh.write(chunk)
+                            item["downloadedBytes"] += len(chunk)
+                os.replace(tmp, item["path"])
+                item["totalBytes"] = item["downloadedBytes"]
+                item["status"] = "success"
+                ok += 1
+            except Exception as e:
+                item["status"] = "failed"
+                item["error"] = f"{type(e).__name__}: {e}"
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+    state["status"] = (
+        "success" if ok == len(state["items"]) else "partial" if ok else "failed"
+    )
+    state["finishedAt"] = time.monotonic()
+
+
+def _prune_downloads() -> None:
+    """只留最近的记录，别让长跑的服务把内存攒满"""
+    if len(_DOWNLOADS) <= _DOWNLOAD_KEEP:
+        return
+    done = [k for k, v in _DOWNLOADS.items() if v["status"] != "downloading"]
+    for k in done[: len(_DOWNLOADS) - _DOWNLOAD_KEEP]:
+        _DOWNLOADS.pop(k, None)
+
+
+def _download_snapshot(download_id: str) -> dict:
+    """把某次下载的当前状态整理成可以直接念给用户听的样子。
+    刻意不带 url：本工具存在的意义就是让签名链接不必进对话。"""
+    state = _DOWNLOADS.get(download_id)
+    if not state:
+        return {
+            "code": "404",
+            "msg": (
+                f"没有 downloadId={download_id} 的下载记录（服务重启或记录过期后会丢失），"
+                "请重新调 download_video_result。"
+            ),
+        }
+
+    elapsed = (state.get("finishedAt") or time.monotonic()) - state["startedAt"]
+    got = sum(i["downloadedBytes"] for i in state["items"])
+    total = sum(i["totalBytes"] or 0 for i in state["items"])
+    speed = got / elapsed if elapsed > 0 else 0
+    percent = (got / total * 100) if total else 0.0
+
+    snapshot = {
+        "downloadId": download_id,
+        "status": state["status"],
+        "orderNo": state["orderNo"],
+        "outputNote": state["outputNote"],
+        "saveDir": state["saveDir"],
+        "files": [
+            {
+                "label": i["label"],
+                "path": i["path"],
+                "status": i["status"],
+                "sizeHuman": _human_size(i["downloadedBytes"]),
+                **({"error": i["error"]} if i.get("error") else {}),
+            }
+            for i in state["items"]
+        ],
+        "progress": f"{percent:.1f}%",
+        "downloadedHuman": _human_size(got),
+        "elapsedSeconds": round(elapsed, 1),
+    }
+
+    if state["status"] == "downloading":
+        remaining = (total - got) / (speed or _ASSUMED_DOWNLOAD_BPS) if total else 0
+        snapshot["etaHuman"] = _human_duration(remaining)
+        return {
+            "code": "202",
+            "data": snapshot,
+            "msg": (
+                f"下载中 {percent:.1f}%（{_human_size(got)}"
+                + (f"/{_human_size(total)}，剩余{_human_duration(remaining)}" if total else "")
+                + "）。请把这个进度转述给用户，再调一次 get_download_status 继续看；"
+                "下载在后台跑，不会因此中断。"
+            ),
+        }
+
+    done_note = (f"产出：{state['outputNote']}（原样照抄，不要自己推断有没有配音）。"
+                 if state["outputNote"] else "")
+    if state["status"] == "success":
+        return {
+            "code": "200",
+            "data": snapshot,
+            "msg": (
+                f"已下载到 {state['saveDir']}（共 {_human_size(got)}，"
+                f"耗时 {_format_duration(elapsed)}）。{done_note}"
+                "请把 files 里的本地路径逐行念给用户，不要再贴签名链接。"
+            ),
+        }
+
+    failed = [f"{i['label']}：{i.get('error', '')}" for i in state["items"] if i["status"] == "failed"]
+    return {
+        "code": "500",
+        "data": snapshot,
+        "msg": (
+            ("部分文件下载失败" if state["status"] == "partial" else "下载失败")
+            + "：" + "；".join(failed) + "。已成功的文件路径在 files 里，可以先给用户。"
+            "重试直接再调一次 download_video_result（地址每次都重新签发，不存在过期问题），"
+            "用 items 只补失败的那几项。"
+        ),
+    }
+
+
 class TranslationClient:
     """翻译 API 客户端"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, local_fs: bool = True):
         self.api_key = api_key
+        # 服务端能不能替用户把文件写到他本机。stdio 模式天然可以；HTTP 模式由
+        # 部署者用 MCP_LOCAL_FS 声明。返回文案按它分支——不然会让调用方去调一个
+        # 根本不在工具列表里的 download_video_result，白费一轮。
+        self.local_fs = local_fs
         self.client = httpx.AsyncClient(
             base_url=API_BASE_URL,
             headers={
@@ -930,6 +1149,7 @@ class TranslationClient:
                         "totalElapsedSeconds": round(total),
                         "totalWaited": _format_duration(total),
                         "watermark": watermark,
+                        "expiresAt": _expires_at(target_url),
                         "downloadUrl": target_url,
                         "downloadUrlCN": target_url_cn,
                         "downloadNote": (
@@ -1214,6 +1434,7 @@ class TranslationClient:
             return result
 
         result["watermark"] = bool(is_watermark)
+        result["expiresAt"] = _expires_at(result.get("url"))
         result["lineNote"] = (
             ("这是带水印的版本。" if is_watermark else "这是无水印版本。")
             + "url 走 CloudFront；url2 为国内中转线路（部分存储类型为 null），"
@@ -1272,7 +1493,7 @@ class TranslationClient:
         invalid = _check_video_task(video_task_param)
         if invalid:
             return {"code": "400", "msg": invalid, "data": {"videoTaskParam": video_task_param}}
-        return await self._post(
+        result = await self._post(
             f"{VIDEO_PREFIX}/submitVideoTranslate",
             {
                 "sourceLanguage": source_language,
@@ -1282,6 +1503,27 @@ class TranslationClient:
                 "videoTaskParam": video_task_param,
             },
         )
+        if result.get("code") in ("200", 200):
+            _record_video_submit(source_file_object_key, target_language, result.get("data"))
+            # 之前这里裸返上游 JSON，一句话都没有。上游其实给了真实时长和真实扣费，
+            # 但都埋在几十个字段中间，调用方于是接着用自己之前猜的那个时长往下说
+            # （把 21 秒说成 5 分 51 秒、4 额度说成 47 额度、还把本次消耗读成余额）。
+            # 数字放进 msg 它就照抄，这一条已经在 outputNote 上验证过了。
+            data = result.get("data") or {}
+            free = data.get("freeTranslateQuota") or 0
+            wallet = data.get("walletTranslateQuota") or 0
+            duration_ms = data.get("videoDuration")
+            result["msg"] = (
+                f"已提交，订单号 {data.get('videoTranslateOrderNo')}。"
+                + (f"服务端读到的真实时长是 {_format_duration((duration_ms or 0) / 1000)}"
+                   if duration_ms else "服务端未返回时长")
+                + f"，本次实扣 {free + wallet} 额度"
+                + (f"（免费 {free} + 钱包 {wallet}）" if wallet else "（免费额度）")
+                + "。这两个数以本条为准：之前试算用的时长如果是估的，别再拿那个数字往下说；"
+                "这里的额度是本次消耗，不是账户余额，本接口不返回余额，不要当成余额报给用户。"
+                "接着用 wait_for_video_translation 跟进。"
+            )
+        return result
     
     async def video_translate_quota_calculate(
         self,
@@ -1309,6 +1551,21 @@ class TranslationClient:
                 f"传入的 video_duration={video_duration:g} 不足 1000 毫秒（1 秒）。"
                 "这个参数的单位是毫秒，确认一下是不是把秒当毫秒传了——"
                 "传错会让试算额度远低于实际扣费。"
+            )
+        # 试算的输入是调用方给的，服务端无从核实。实测调用方会按文件大小猜时长
+        # （4.8MB 猜成「5-6 分钟」，实际 21 秒），然后把差了十倍的预算报给用户。
+        # 算式和这个前提都得写在返回里，不然它连乘法都会自己编一个。
+        data = result.get("data") or {}
+        units = data.get("videoDuration")
+        quota = data.get("translateQuota")
+        if units is not None and quota is not None:
+            result["quotaNote"] = (
+                f"按你传入的 {video_duration / 1000:g} 秒算：不足 30 秒的按 30 秒计，"
+                f"共 {units} 个计费单位，配音={voice_role}、字幕={subtitle_type} 下"
+                f"合计 {quota} 额度。"
+                "注意这个时长是你传进来的，服务端核实不了——必须来自文件的真实时长"
+                "（ffprobe 或媒体信息），按文件大小推码率猜出来的数在数量级上就不成立，"
+                "拿它报给用户等于报了个假预算。"
             )
         return result
     
@@ -1457,12 +1714,29 @@ class TranslationClient:
             if status == VIDEO_STATUS_DONE:
                 _WAITS.pop(order_no, None)
                 target = data.get("targetFileUrl")
+                note = data.get("outputNote") or ""
+                # 产出说明必须挤进 msg。实测三条几百字符的签名链接会把 data 尾部
+                # 顶出客户端的显示截断线，调用方压根读不到 outputNote，于是照着
+                # 十几轮之前自己传过的参数瞎编——voiceRole=No 也能说成「英文配音」。
+                # msg 是每一轮都被完整转述的字段，是唯一放得住这句话的地方。
                 return {
                     "code": "200",
-                    "msg": f"视频翻译完成（累计等待 {_format_duration(total)}）",
+                    "msg": (
+                        f"视频翻译完成（累计等待 {_format_duration(total)}）。"
+                        + (f"产出：{note}（这句请原样照抄，不要自己推断有没有配音）。" if note else "")
+                        + (
+                            "接着调 download_video_result 把视频和字幕直接下到用户本机，"
+                            "不要把签名链接贴给用户。"
+                            if self.local_fs
+                            else "本次部署没有开放服务端落盘（工具列表里没有 download_video_result），"
+                            "请按 downloadNote 把签名链接原样完整交给用户。"
+                        )
+                    ),
                     "data": {
+                        # 短字段一律排在长链接前面，理由同上：链接会把后面的挤没
                         "orderNo": order_no,
                         "finished": True,
+                        "outputNote": note,
                         "videoFileName": data.get("videoFileName"),
                         "sourceLanguage": data.get("sourceLanguage"),
                         "targetLanguage": data.get("targetLanguage"),
@@ -1470,36 +1744,52 @@ class TranslationClient:
                         "elapsed": round(elapsed),
                         "totalElapsedSeconds": round(total),
                         "totalWaited": _format_duration(total),
-                        "translatedVideoUrl": target,
-                        "sourceVideoUrl": data.get("sourceFileUrl"),
-                        "targetSubtitlesUrl": data.get("targetSubtitlesUrl"),
-                        "sourceSubtitlesUrl": data.get("sourceSubtitlesUrl"),
                         "usedFreeQuota": data.get("freeTranslateQuota"),
                         "usedWalletQuota": data.get("walletTranslateQuota"),
-                        "outputNote": data.get("outputNote"),
+                        "expiresAt": _expires_at(target),
                         "downloadNote": (
-                            "translatedVideoUrl 是译制后的视频，targetSubtitlesUrl 是译文字幕。"
-                            "描述这个视频时请原样照抄 outputNote，不要自己推断有没有配音。"
+                            (
+                                "下载首选 download_video_result（order_no 传本单号）：它由服务端"
+                                "直接把文件写到用户本机，返回一行本地路径，不用把签名链接贴进对话。"
+                                "拿不到该工具时才退回用下面这些链接——"
+                                if self.local_fs
+                                else "本次部署没有开放服务端落盘，只能给链接——"
+                            )
+                            + "translatedVideoUrl 是译制后的视频，targetSubtitlesUrl 是译文字幕。"
                             + _URL_VERBATIM_NOTE
                             + _expiry_note(target)
                             + "要人工校对字幕再重新生成，用 get_video_subtitles 取字幕、"
                             "改好后调 rewrite_video_subtitles（会再次扣费）。"
                         ),
+                        # 链接垫底
+                        "translatedVideoUrl": target,
+                        "sourceVideoUrl": data.get("sourceFileUrl"),
+                        "targetSubtitlesUrl": data.get("targetSubtitlesUrl"),
+                        "sourceSubtitlesUrl": data.get("sourceSubtitlesUrl"),
                     },
                 }
 
             if status in VIDEO_STATUS_TERMINAL:
                 # 3 失败 / 4 已取消
                 _WAITS.pop(order_no, None)
-                reason = data.get("errorMessage") or VIDEO_STATUS_TEXT.get(status, "")
+                # 上游经常不给 errorMessage。之前这里退化成状态文本「失败」，等于
+                # 什么都没说，调用方就自己编了个原因（「大概是没有清晰的人声」）
+                # 并据此改参数重提。原因不明就明说不明，别给它留想象空间；
+                # step 是真有的信息，起码能说清楚死在哪一步。
+                reason = data.get("errorMessage") or ""
+                step_text = data.get("stepText") or VIDEO_STEP_TEXT.get(data.get("step"), "")
                 return {
                     "code": "500",
                     "msg": (
                         f"视频任务已终止：{VIDEO_STATUS_TEXT.get(status, status)}"
-                        f"{'（' + reason + '）' if data.get('errorMessage') else ''}"
-                        f"，累计等待 {_format_duration(total)}。"
-                        "请把失败原因告诉用户，问过用户之后再决定是否重新提交，"
-                        "不要自己直接重提——重新提交会再次扣费。"
+                        + (f"，停在「{step_text}」这一步" if step_text else "")
+                        + (f"，上游给的原因：{reason}" if reason
+                           else "，上游没有给出失败原因——请如实告诉用户「原因不明」，"
+                                "不要自己推测是音频、语言还是格式的问题")
+                        + f"。累计等待 {_format_duration(total)}。"
+                        "重新提交是一单新任务、会再扣一次费，所以必须先把上面这些告诉用户、"
+                        "问清楚要不要重做；同意后再带 retry_of_order_no 和 retry_confirmed=true "
+                        "调 translate_video，不带这两个参数会被直接拒绝。"
                     ),
                     "data": {
                         "orderNo": order_no,
@@ -1507,7 +1797,11 @@ class TranslationClient:
                         "failed": True,
                         "status": status,
                         "statusText": VIDEO_STATUS_TEXT.get(status, str(status)),
-                        "reason": reason,
+                        "failedStep": data.get("step"),
+                        "failedStepText": step_text,
+                        "reasonKnown": bool(reason),
+                        "reason": reason or "上游未提供失败原因，不要推测",
+                        "retryOfOrderNo": order_no,
                         "totalElapsedSeconds": round(total),
                     },
                 }
@@ -1535,3 +1829,144 @@ class TranslationClient:
 
             await asyncio.sleep(interval)
             interval = min(interval + 2, 15)
+
+
+    # ============ 结果下载 ============
+
+    async def download_video_result(
+        self,
+        order_no: str,
+        save_dir: Optional[str] = None,
+        items: Optional[list] = None,
+        wait: int = 20,
+    ) -> dict:
+        """把译制视频与字幕直接下到本机，替代把签名链接贴进对话
+
+        每次都现查详情拿地址，所以签发多久之前的链接、有没有过期都不影响。
+        小文件在这一次调用里就下完；超过 wait 秒还没完就带进度返回，让调用方
+        转述后用 get_download_status 继续跟——和 upload_file 一个路子。
+        """
+        import asyncio
+        import uuid
+
+        detail = await self.get_video_translate_detail(order_no)
+        if detail.get("code") not in ("200", 200):
+            return detail
+
+        data = detail.get("data") or {}
+        status = data.get("status")
+        if status != VIDEO_STATUS_DONE:
+            return {
+                "code": "400",
+                "msg": (
+                    f"任务当前是「{VIDEO_STATUS_TEXT.get(status, status)}」，还没有产出可下。"
+                    + ("请先用 wait_for_video_translation 等它完成。"
+                       if status in (0, 1)
+                       else "该任务不会再有产出了，不要重复下载。")
+                ),
+                "data": {"orderNo": order_no, "status": status},
+            }
+
+        wanted = list(items) if items else list(DOWNLOAD_ITEMS_DEFAULT)
+        unknown = [k for k in wanted if k not in DOWNLOAD_ITEMS]
+        if unknown:
+            return {
+                "code": "400",
+                "msg": (
+                    f"items 里有不认识的值 {unknown}，可选：{list(DOWNLOAD_ITEMS)}。"
+                ),
+            }
+
+        # 落地目录：默认下载到用户的下载目录，那是他们会去找文件的地方
+        save_dir = os.path.abspath(os.path.expanduser(
+            save_dir or (os.path.join(os.path.expanduser("~"), "Downloads")
+                         if os.path.isdir(os.path.join(os.path.expanduser("~"), "Downloads"))
+                         else os.path.expanduser("~"))
+        ))
+        try:
+            os.makedirs(save_dir, exist_ok=True)
+        except OSError as e:
+            return {
+                "code": "400",
+                "msg": (
+                    f"服务端建不了目录 {save_dir}（{e}）。换一个 save_dir 重试；"
+                    "如果 MCP 服务部署在另一台机器上，本工具落的盘也是那台机器的，"
+                    "这种情况请改用返回里的签名链接。"
+                ),
+            }
+
+        stem = _safe_stem(data.get("videoFileName"))
+        src_lang = data.get("sourceLanguage") or "src"
+        tgt_lang = data.get("targetLanguage") or "target"
+        video_ext = os.path.splitext(data.get("videoFileName") or "")[1] or ".mp4"
+        names = {
+            "video": f"{stem}.{tgt_lang}{video_ext}",
+            "target_subtitles": f"{stem}.{tgt_lang}.srt",
+            "source_subtitles": f"{stem}.{src_lang}.srt",
+            "source_video": f"{stem}.source{video_ext}",
+        }
+
+        entries, missing = [], []
+        for key in wanted:
+            field, label = DOWNLOAD_ITEMS[key]
+            url = data.get(field)
+            if not url:
+                missing.append(label)
+                continue
+            entries.append({
+                "kind": key,
+                "label": label,
+                "url": url,
+                "path": _unique_path(os.path.join(save_dir, names[key])),
+                "totalBytes": 0,
+                "downloadedBytes": 0,
+                "status": "pending",
+                "error": "",
+            })
+
+        if not entries:
+            return {
+                "code": "500",
+                "msg": f"这个任务没有可下载的产物（缺：{'、'.join(missing)}）。",
+                "data": {"orderNo": order_no},
+            }
+
+        download_id = uuid.uuid4().hex[:12]
+        state = {
+            "orderNo": order_no,
+            "saveDir": save_dir,
+            "outputNote": data.get("outputNote") or "",
+            "items": entries,
+            "status": "downloading",
+            "startedAt": time.monotonic(),
+            "finishedAt": None,
+        }
+        _DOWNLOADS[download_id] = state
+        _prune_downloads()
+
+        # 丢进线程，别让下载期间整个事件循环冻住；task 存进 state 免得被 GC 提前回收
+        state["_task"] = asyncio.create_task(asyncio.to_thread(_fetch_files, state))
+
+        result = await self._await_download(download_id, wait)
+        if missing:
+            result.setdefault("data", {})["skipped"] = missing
+        return result
+
+    async def get_download_status(self, download_id: str, wait: int = 8) -> dict:
+        """查询 download_video_result 发起的下载进度，未完成时最多等 wait 秒再返回"""
+        return await self._await_download(download_id, wait)
+
+    @staticmethod
+    async def _await_download(download_id: str, wait: int) -> dict:
+        """等一小会儿再给快照，免得调用方空转着反复查"""
+        import asyncio
+
+        state = _DOWNLOADS.get(download_id)
+        if state:
+            # 先让出一次：wait=0 时下面的循环一次都不进，下载线程连启动的机会
+            # 都没有，快照永远停在 0%
+            await asyncio.sleep(0)
+            deadline = time.monotonic() + max(0, wait)
+            while state["status"] == "downloading" and time.monotonic() < deadline:
+                await asyncio.sleep(0.3)
+        return _download_snapshot(download_id)
