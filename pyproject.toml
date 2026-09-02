@@ -25,3 +25,8 @@ dev = [
 [project.scripts]
 trans-mcp = "trans_mcp.server:main"
 trans-mcp-http = "trans_mcp.http_server:main"
+
+[tool.pytest.ini_options]
+# 根目录的 test_api.py / test_upload.py 是手动连真实 API 的冒烟脚本，
+# 不是用例，只收集 tests/ 避免被误收集
+testpaths = ["tests"]
