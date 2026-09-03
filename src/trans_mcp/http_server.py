@@ -4,6 +4,8 @@ import asyncio
 import os
 import sys
 import json
+import time
+from contextlib import asynccontextmanager
 from aiohttp import web
 from mcp.server.lowlevel.server import Server
 from mcp.types import (
@@ -20,15 +22,91 @@ from .client import TranslationClient
 from .tools import TOOLS, build_tool_handlers, _to_json
 
 
+class _PooledClient:
+    """池里的一条 TranslationClient，外加「还有几个请求正在用它」"""
+
+    __slots__ = ("client", "inflight", "idle_since")
+
+    def __init__(self, client: TranslationClient):
+        self.client = client
+        self.inflight = 0
+        self.idle_since = 0.0
+
+
+class ClientPool:
+    """按 API Key 复用 TranslationClient。
+
+    原先每个 JSON-RPC 请求都 new 一个 TranslationClient，而里面是一条自带连接池的
+    httpx.AsyncClient，并且从头到尾没人 close——连接和 fd 只涨不落，服务多跑几天
+    就耗尽。这里按 key 复用，空闲够久才关。
+
+    关的时机要看引用计数：wait_for_video_translation 一次能挂几分钟，期间它用的
+    那条 client 绝不能被回收线清掉，否则请求会在半路撞上 "client has been closed"。
+    """
+
+    # 空闲多久回收。比最长的一次等待（wait_* 的 timeout 上限）宽裕就行。
+    IDLE_TTL = 300.0
+    # 空闲连接的条数上限，防止一批一次性 key 把池撑大
+    MAX_IDLE = 64
+
+    def __init__(self):
+        self._entries: dict[str, _PooledClient] = {}
+        self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def acquire(self, api_key: str):
+        async with self._lock:
+            entry = self._entries.get(api_key)
+            if entry is None:
+                entry = _PooledClient(TranslationClient(api_key))
+                self._entries[api_key] = entry
+            entry.inflight += 1
+        try:
+            yield entry.client
+        finally:
+            async with self._lock:
+                entry.inflight -= 1
+                if entry.inflight <= 0:
+                    entry.idle_since = time.monotonic()
+                doomed = self._collect_stale()
+            for victim in doomed:
+                await victim.close()
+
+    def _collect_stale(self):
+        """挑出可以关掉的连接并从池里摘走。调用方已持锁。"""
+        now = time.monotonic()
+        idle = [
+            (entry.idle_since, key)
+            for key, entry in self._entries.items()
+            if entry.inflight <= 0
+        ]
+        stale = {key for since, key in idle if now - since > self.IDLE_TTL}
+        # 还没到期但空闲条数超上限，就从最早空闲的开始多关几条
+        over = len(idle) - len(stale) - self.MAX_IDLE
+        if over > 0:
+            for _, key in sorted(k for k in idle if k[1] not in stale)[:over]:
+                stale.add(key)
+        return [self._entries.pop(key).client for key in stale]
+
+    async def close_all(self):
+        async with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            await entry.client.close()
+
+
 class TransMcpHttpServer:
     """HTTP 模式的 MCP Server"""
-    
+
     def __init__(self, host: str = "0.0.0.0", port: int = 8080, mcp_path: str = "/mcp"):
         self.host = host
         self.port = port
         # 同域名下落地页可能已占用 /mcp，允许把服务端点挪到别的路径
         self.mcp_path = self._normalize_path(mcp_path)
         self.server = Server("trans-mcp")
+        # 服务器不存密钥，但同一个 key 的连续调用该复用同一条连接
+        self.pool = ClientPool()
 
     @staticmethod
     def _normalize_path(path: str) -> str:
@@ -53,7 +131,36 @@ class TransMcpHttpServer:
     def _build_tool_handlers(client):
         """复用 tools.py 中的工具处理器定义"""
         return build_tool_handlers(client)
-    
+
+    async def _call_tool(self, api_key: str, params: dict, msg_id):
+        """跑一次 tools/call。只有这一条路径需要上游连接，所以池子在这里才借。"""
+        tool_name = params.get("name")
+        arguments = params.get("arguments", {})
+
+        async with self.pool.acquire(api_key) as client:
+            tool_handlers = self._build_tool_handlers(client)
+            if tool_name not in tool_handlers:
+                return web.json_response({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}
+                })
+            try:
+                result = await tool_handlers[tool_name](arguments)
+            except Exception as e:
+                return web.json_response({
+                    "jsonrpc": "2.0",
+                    "id": msg_id,
+                    "error": {"code": -32000, "message": str(e)}
+                })
+            return web.json_response({
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "content": [{"type": "text", "text": _to_json(result)}]
+                }
+            })
+
     async def handle_sse(self, request):
         """处理 SSE 连接"""
         # 验证 API Key
@@ -100,11 +207,10 @@ class TransMcpHttpServer:
     async def handle_message(self, request):
         """处理 JSON-RPC 消息"""
         # 验证 API Key
-        if not self._get_api_key(request):
+        api_key = self._get_api_key(request)
+        if not api_key:
             return web.Response(status=401, text='Unauthorized: 缺少 Authorization: Bearer <key>')
-        
-        tool_handlers = self._build_tool_handlers(TranslationClient(self._get_api_key(request)))
-        
+
         try:
             body = await request.json()
             method = body.get("method")
@@ -129,32 +235,7 @@ class TransMcpHttpServer:
                 })
             
             elif method == "tools/call":
-                tool_name = params.get("name")
-                arguments = params.get("arguments", {})
-                
-                
-                if tool_name in tool_handlers:
-                    try:
-                        result = await tool_handlers[tool_name](arguments)
-                        return web.json_response({
-                            "jsonrpc": "2.0",
-                            "id": msg_id,
-                            "result": {
-                                "content": [{"type": "text", "text": _to_json(result)}]
-                            }
-                        })
-                    except Exception as e:
-                        return web.json_response({
-                            "jsonrpc": "2.0",
-                            "id": msg_id,
-                            "error": {"code": -32000, "message": str(e)}
-                        })
-                else:
-                    return web.json_response({
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}
-                    })
+                return await self._call_tool(api_key, params, msg_id)
             
             else:
                 return web.json_response({
@@ -184,8 +265,6 @@ class TransMcpHttpServer:
                 "error": {"code": -32000, "message": "Missing Authorization: Bearer <key> header"}
             }, status=401)
         
-        # 创建翻译客户端（按请求绑定 API Key）
-        tool_handlers = self._build_tool_handlers(TranslationClient(api_key))
         try:
             body = await request.json()
             method = body.get("method")
@@ -264,32 +343,7 @@ class TransMcpHttpServer:
                 })
 
             elif method == "tools/call":
-                tool_name = params.get("name")
-                arguments = params.get("arguments", {})
-                
-                
-                if tool_name in tool_handlers:
-                    try:
-                        result = await tool_handlers[tool_name](arguments)
-                        return web.json_response({
-                            "jsonrpc": "2.0",
-                            "id": msg_id,
-                            "result": {
-                                "content": [{"type": "text", "text": _to_json(result)}]
-                            }
-                        })
-                    except Exception as e:
-                        return web.json_response({
-                            "jsonrpc": "2.0",
-                            "id": msg_id,
-                            "error": {"code": -32000, "message": str(e)}
-                        })
-                else:
-                    return web.json_response({
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
-                        "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}
-                    })
+                return await self._call_tool(api_key, params, msg_id)
             
             else:
                 return web.json_response({
@@ -312,7 +366,9 @@ class TransMcpHttpServer:
         app.router.add_post('/message', self.handle_message)
         app.router.add_post(self.mcp_path, self.handle_mcp)  # Streamable HTTP 端点
         app.router.add_get('/health', self.handle_health)
-        
+        # 进程退出时把池里的连接一并关掉，别把 close 留给解释器回收
+        app.on_cleanup.append(lambda _app: self.pool.close_all())
+
         print(f"Trans MCP Server (HTTP) starting on {self.host}:{self.port}", file=sys.stderr)
         print(f"SSE endpoint: http://{self.host}:{self.port}/sse", file=sys.stderr)
         print(f"Message endpoint: http://{self.host}:{self.port}/message", file=sys.stderr)

@@ -162,17 +162,18 @@ trans-mcp
 
 ## 环境配置
 
-### 测试环境（默认）
-```python
-API_BASE_URL = "http://internal-test-host:6101"
+上游地址由 `BELINDOC_API_BASE_URL` 决定，stdio 和 HTTP 两种模式都读它：
+
+| 环境 | 取值 |
+|------|------|
+| 测试（默认，不设即用） | `http://internal-test-host:6101` |
+| 生产 | `https://belindoc.com/api` |
+
+```bash
+export BELINDOC_API_BASE_URL="https://belindoc.com/api"
 ```
 
-### 生产环境
-```python
-API_BASE_URL = "https://belindoc.com/api"
-```
-
-修改 `src/trans_mcp/client.py` 中的 `API_BASE_URL` 切换环境。
+不用改源码——部署包是 tar 解出来的，改源码等于每次升级都要重改一遍。
 
 ## 开发
 

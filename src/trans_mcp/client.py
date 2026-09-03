@@ -16,10 +16,11 @@ from typing import Optional
 # 用户可见的产出串走消息表（九种语言），给模型看的指令仍是中文
 from .i18n import t
 
-# 测试环境
-API_BASE_URL = "http://internal-test-host:6101"
-# 生产环境（取消注释切换）
-# API_BASE_URL = "https://belindoc.com/api"
+# 上游 API 地址。默认测试环境；切生产（https://belindoc.com/api）只需要设
+# BELINDOC_API_BASE_URL，不用再改这一行——部署包是 tar 解出来的，改源码等于
+# 每次升级都要重新改一遍。
+DEFAULT_API_BASE_URL = "http://internal-test-host:6101"
+API_BASE_URL = os.environ.get("BELINDOC_API_BASE_URL", "").strip().rstrip("/") or DEFAULT_API_BASE_URL
 DOC_PREFIX = "/external/translate"
 # 上游瞬时错误码，重试即可（见 docs/document-translation-api-guide.md 常见错误）：
 #   600   System is busy

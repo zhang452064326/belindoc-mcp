@@ -52,6 +52,8 @@ if [ ! -f .env ]; then
 MCP_HOST=0.0.0.0
 MCP_PORT=$PORT
 MCP_PATH=$MCP_PATH
+# 上游地址，不设即测试环境；生产环境取消下面这行的注释
+# BELINDOC_API_BASE_URL=https://belindoc.com/api
 EOF
 fi
 
