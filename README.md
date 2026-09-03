@@ -1,212 +1,224 @@
 # Trans MCP Server
 
-文档翻译 MCP 服务，支持 PDF、文档、图片、视频翻译。
+Belindoc 翻译开放 API 的 MCP 服务：文档（PDF / Word / Excel / Markdown / 图片）和视频翻译、
+字幕改写。
 
-## 功能特性
+## 两种运行方式
 
-- 多格式支持：PDF、Word、Excel、Markdown、图片、视频
-- 语言检测：自动识别源语言
-- 状态追踪：实时查询翻译进度
-- 多模型支持：Gemini-2.5-Flash 等多种翻译模型
+| | stdio | HTTP 远程 |
+|---|---|---|
+| 入口 | `trans-mcp` | `trans-mcp-http` |
+| 跑在哪 | 用户自己的机器上 | 一台服务器上，多人共用 |
+| API Key | 服务端从 `BELINDOC_API_KEY` 读 | 每个客户端自己带 `Authorization: Bearer <key>`，服务器不存任何密钥 |
+| 传输 | stdio | Streamable HTTP（SSE + `Mcp-Session-Id`） |
+
+两种方式的工具、行为完全一致，包括服务端直接向用户弹窗确认（elicitation）和等待期间的
+进度通知。部署 HTTP 模式看 [DEPLOY.md](DEPLOY.md)。
 
 ## 安装
 
 ```bash
-# 克隆项目
-cd /Users/zhangjun/project/trans_mcp
-
-# 创建虚拟环境
+cd /path/to/trans-mcp
 python3 -m venv .venv
 source .venv/bin/activate
-
-# 安装依赖
 pip install -e .
 ```
 
-## 配置
+## 环境变量
 
-### 1. 获取 API Key
+| 变量 | 用在哪 | 说明 |
+|------|--------|------|
+| `BELINDOC_API_KEY` | stdio | 必需。格式 `ft_` + 40 位随机串，共 43 字符 |
+| `BELINDOC_API_BASE_URL` | 都 | 上游地址。不设即测试环境 `http://internal-test-host:6101`；生产填 `https://belindoc.com/api` |
+| `MCP_HOST` / `MCP_PORT` | HTTP | 监听地址与端口，默认 `0.0.0.0:8080` |
+| `MCP_PATH` | HTTP | MCP 服务端点路径，默认 `/mcp`。同域名下落地页占了 `/mcp` 时挪开 |
+| `MCP_LOCALE` | 都 | 用户可见文案的语言，默认 `zh`。见下方「输出语言」 |
 
-在 Belindoc 平台注册并创建 API Key：
-- 登录 https://belindoc.com
-- 进入「开放平台」→「API Key 管理」
-- 创建新的 API Key（格式：`ft_` + 40 位随机串）
+HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器的 `.env`。
+完整注释见 [.env.example](.env.example)。
 
-### 2. 配置环境变量
+### 获取 API Key
 
-```bash
-export BELINDOC_API_KEY="ft_your_api_key_here"
-```
+登录 https://belindoc.com → 「开放平台」→「API Key 管理」→ 创建。
 
-或使用 `.env` 文件：
+## 客户端接入
 
-```bash
-cp .env.example .env
-# 编辑 .env 文件，填入你的 API Key
-```
-
-### 3. 测试连接
-
-```bash
-python test_api.py
-```
-
-## 使用
-
-### 启动 MCP Server
-
-```bash
-# 激活虚拟环境
-source .venv/bin/activate
-
-# 启动服务
-trans-mcp
-```
-
-### MCP 配置示例
-
-在 Claude Desktop 或其他 MCP 客户端中配置：
+### stdio
 
 ```json
 {
   "mcpServers": {
     "trans-mcp": {
-      "command": "/Users/zhangjun/project/trans_mcp/.venv/bin/trans-mcp",
+      "command": "/path/to/trans-mcp/.venv/bin/trans-mcp",
       "env": {
-        "BELINDOC_API_KEY": "ft_your_api_key_here"
+        "BELINDOC_API_KEY": "ft_你的API密钥"
       }
     }
   }
 }
 ```
 
-## 支持的语言
+配置文件位置：Claude Desktop 是 `~/Library/Application Support/Claude/claude_desktop_config.json`，
+Codex 是 `~/.codex/config.json`。
 
-| 语言 | 代码 |
-|------|------|
-| 任意语言 | AnyLanguage |
-| 中文 | zh-CN |
-| 英文 | en |
-| 日文 | ja |
-| 韩文 | ko |
-| 法文 | fr |
-| 德文 | de |
-| 俄文 | ru |
-| 阿拉伯文 | ar |
+### HTTP 远程
 
-## 翻译模型
+```json
+{
+  "mcpServers": {
+    "belindoc": {
+      "type": "streamablehttp",
+      "url": "http://YOUR_SERVER_IP:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer ft_你的API密钥"
+      }
+    }
+  }
+}
+```
 
-- Gemini-2.5-Flash（默认）
-- 其他模型可通过 `get_model_list` 获取
+Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.codex/config.toml` 的话：
+
+```toml
+[mcp_servers.belindoc]
+url = "http://YOUR_SERVER_IP:8080/mcp"
+bearer_token_env_var = "BELINDOC_API_KEY"
+```
+
+## 典型流程
+
+**文档**：`upload_document` 取预签名链接 → 按返回的 `uploadCommand` 上传 →
+（PDF 才要）`check_pdf_ocr` 看是不是扫描件 → `translate_document` 提交 →
+`wait_for_translation` 跟进 → `get_document_translation_result` 取下载链接。
+
+**视频**：`upload_video` → 上传 → `calculate_video_translation_quota` 试算 →
+`translate_video` 提交（两步确认，见下）→ `wait_for_video_translation` 跟进。
+想改字幕重出一版：`get_video_subtitles` → `calculate_rewrite_quota` →
+`rewrite_video_subtitles` → `get_video_rewrite_status`。
+
+上传由调用方自己执行返回的 `uploadCommand`，服务端不碰用户机器上的文件；下载给的是
+签名链接，问号后面的签名参数一个字符都不能改，截掉就是 403。
 
 ## 工具列表
 
-### 语言工具
-- `get_supported_languages` - 获取支持的语言列表
-
-### 模型工具
-- `get_model_list` - 获取翻译模型列表
+### 账户与元信息
+| 工具 | 说明 |
+|------|------|
+| `get_supported_languages` | 支持的语言列表（79 种，语言码 → 显示名） |
+| `get_model_list` | 当前账户可用的翻译模型 |
+| `get_account_status` | 可用额度、会员档位、各项限额（单视频时长 / 并发数 / 单文件大小） |
 
 ### 文档翻译
-- `upload_document` - 批量获取文档上传链接
-- `translate_document` - 提交文档翻译任务
-- `get_document_translation_status` - 查询翻译状态
-- `get_document_translation_result` - 获取翻译结果下载链接
-- `list_document_translations` - 查询翻译任务列表
-- `get_document_translation_by_batch` - 通过批次号查询翻译任务
+| 工具 | 说明 |
+|------|------|
+| `upload_document` | 取文档的预签名上传链接 |
+| `check_pdf_ocr` | 判断已上传的 PDF 是不是扫描件 / 双层 PDF |
+| `translate_document` | 提交文档翻译任务 |
+| `wait_for_translation` | 等待任务完成，进度一有变化就返回 |
+| `get_document_translation_status` | 查单个任务状态 |
+| `get_document_translation_result` | 取译文下载链接 |
+| `list_document_translations` | 分页查任务列表 |
+| `get_document_translation_by_batch` | 按批次号查任务 |
 
 ### 视频翻译
-- `upload_video` - 获取视频上传链接
-- `translate_video` - 提交视频翻译任务
-- `calculate_video_translation_quota` - 计算视频翻译配额
-- `get_video_translation_status` - 查询视频翻译状态
-- `list_video_translations` - 查询视频翻译任务列表
-- `cancel_video_translation` - 取消视频翻译任务
-- `get_video_subtitles` - 获取视频字幕
-- `rewrite_video_subtitles` - 提交字幕改写任务
-- `get_video_rewrite_status` - 查询字幕改写状态
+| 工具 | 说明 |
+|------|------|
+| `upload_video` | 取视频的预签名上传地址 |
+| `calculate_video_translation_quota` | 试算要花多少额度，不扣费 |
+| `translate_video` | 提交视频翻译任务（会真扣额度，两步确认） |
+| `wait_for_video_translation` | 等待任务完成，进度一有变化就返回 |
+| `get_video_translation_status` | 查单个任务状态 |
+| `list_video_translations` | 分页查任务列表（只有最近 15 天） |
+| `cancel_video_translation` | 取消任务 |
+
+### 字幕改写
+| 工具 | 说明 |
+|------|------|
+| `get_video_subtitles` | 取原文与译文字幕下载地址 |
+| `calculate_rewrite_quota` | 试算改写要花多少额度，不扣费 |
+| `rewrite_video_subtitles` | 用编辑后的字幕重新生成视频（会真扣额度，两步确认） |
+| `get_video_rewrite_status` | 查改写进度 |
+
+### 排查
+| 工具 | 说明 |
+|------|------|
+| `probe_elicitation` | 自检：这个客户端到底吃不吃 elicitation。不翻译、不提交、不扣额度 |
+
+## 扣费确认
+
+`translate_video` 和 `rewrite_video_subtitles` 会真扣额度，所以提交是**两步**，第一次
+一定不会提交：
+
+- 客户端支持 **elicitation** 时，服务端直接弹窗问用户，一次调用即可；
+- 不支持时退回**确认码**：第一次调用返回 409 + 一段给用户看的话 + 一张菜单（配音 ×
+  字幕的各种组合，每格自带额度和 `confirmToken`），把菜单原样给用户看、他挑了哪一项，
+  就用那一项的 `confirmToken` 重调一次，这一次才真的提交。
+
+之所以不能只信一个 `user_confirmed=true`：那种布尔量永远是模型自己填的，服务端无法验证
+背后到底有没有问过人。想知道某个客户端走哪条路，调一次 `probe_elicitation`。
+
+## 输出语言
+
+会被念给用户听的那部分文案（任务状态、产出说明、进度行、失败原因、下载说明）支持九种
+语言：`zh` / `zh-Hant` / `en` / `ja` / `ko` / `de` / `fr` / `ru` / `ar`。工具描述和给模型
+的操作指令始终是中文——那是写给模型的。
+
+优先级：工具参数 `locale` > 服务端 `MCP_LOCALE` > `zh`。
 
 ## 故障排除
 
 ### 认证失败 (10004)
 
-```
-错误: {'code': '10004', 'msg': '认证失败请重新登录'}
-```
+API Key 不对、没注册、或格式错（必须 `ft_` 开头共 43 字符）。先 `echo $BELINDOC_API_KEY`
+确认，再去平台看 key 的状态。
 
-**可能原因：**
-1. API Key 不正确或未在数据库中注册
-2. API Key 已过期或被禁用
-3. API Key 格式错误（必须以 `ft_` 开头，共 43 字符）
+### 密钥类错误码 (30306 / 30307 / 30308 / 30309 / 30312)
 
-**解决方法：**
-1. 确认 API Key 是否正确：`echo $BELINDOC_API_KEY`
-2. 在 Belindoc 平台检查 API Key 状态
-3. 重新创建 API Key
+这几个上游一律用 HTTP 200 送回来，业务码在响应体里。工具会把它们翻成一句可执行的话
+（key 没复制全 / 被禁用要重新启用 / 已过期 / IP 不在白名单 / 需联系客服），并明确标注
+**重试、换参数、重新上传都没有用**。只有 30311 是该退避重试的。
+
+### 接口不存在 (404)
+
+返回里会写明「接口 X 在当前服务地址（Y）上不存在」。这不是网络故障，是该功能在这个环境
+没部署，或者 `BELINDOC_API_BASE_URL` 指错了环境。重试无用。
 
 ### 连接超时
 
-```
-错误: ConnectTimeout
-```
-
-**可能原因：**
-1. 后端服务未启动
-2. 网络连接问题
-3. 防火墙阻止访问
-
-**解决方法：**
-1. 检查后端服务状态
-2. 测试网络连接：`ping internal-test-host`
-3. 检查防火墙设置
-
-## 环境配置
-
-上游地址由 `BELINDOC_API_BASE_URL` 决定，stdio 和 HTTP 两种模式都读它：
-
-| 环境 | 取值 |
-|------|------|
-| 测试（默认，不设即用） | `http://internal-test-host:6101` |
-| 生产 | `https://belindoc.com/api` |
-
-```bash
-export BELINDOC_API_BASE_URL="https://belindoc.com/api"
-```
-
-不用改源码——部署包是 tar 解出来的，改源码等于每次升级都要重改一遍。
+检查后端是否在跑、网络是否通、防火墙是否放行。
 
 ## 开发
 
-### 运行测试
-
 ```bash
-# 激活虚拟环境
 source .venv/bin/activate
-
-# 运行测试
+pip install -e ".[dev]"
 pytest tests/
 ```
+
+根目录的 `test_api.py` / `test_upload.py` 是手动连真实 API 的冒烟脚本，不是用例，
+pytest 只收集 `tests/`。
 
 ### 项目结构
 
 ```
-trans_mcp/
-├── README.md           # 项目说明
-├── CONFIG.md          # 配置文档
-├── pyproject.toml     # Python 包配置
-├── .env.example       # 环境变量示例
-├── .gitignore
-├── test_api.py        # API 测试脚本
-├── src/
-│   └── trans_mcp/
-│       ├── __init__.py
-│       ├── server.py  # MCP Server 入口
-│       ├── client.py  # API 客户端
-│       └── tools.py   # MCP 工具定义
-└── tests/
-    ├── __init__.py
-    ├── conftest.py
-    └── test_client.py
+trans-mcp/
+├── README.md              # 本文件
+├── DEPLOY.md              # HTTP 远程模式的部署
+├── INTEGRATION.md         # 客户端配置速查
+├── CONFIG.md              # 环境变量速查
+├── pyproject.toml
+├── .env.example
+├── src/trans_mcp/
+│   ├── server.py          # stdio 入口
+│   ├── http_server.py     # HTTP 入口（Streamable HTTP）
+│   ├── tools.py           # 工具定义与处理器（两种模式共用）
+│   ├── client.py          # 上游 API 客户端
+│   └── i18n.py            # 用户可见文案的九种语言
+├── tests/
+├── docs/                  # 上游开放 API 文档
+├── deploy.sh              # Docker 部署
+├── deploy-linux.sh        # systemd 部署
+└── server.sh              # 本机起停
 ```
 
 ## 许可证
