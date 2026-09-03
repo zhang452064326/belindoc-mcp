@@ -948,7 +948,7 @@ TOOLS = [
     ),
     Tool(
         name="upload_document",
-        description="取文档的预签名上传链接。拿到链接后原样执行返回的 uploadCommand（只替换其中的文件路径，Content-Disposition 一个字符都不能改，否则 S3 报 SignatureDoesNotMatch）。上传成功后用返回的 objectKey 作为 fileObjectKey 调 translate_document。",
+        description="取文档的预签名上传链接。拿到链接后原样执行返回的 uploadCommand（只替换其中的文件路径，Content-Disposition 一个字符都不能改，否则 S3 报 SignatureDoesNotMatch）。上传是访问外网，你那边默认没有网络权限的话，第一次执行就把联网权限一起要上，别先试一次失败再补申请。上传成功后用返回的 objectKey 作为 fileObjectKey 调 translate_document。",
         inputSchema={
             "type": "object",
             "properties": {

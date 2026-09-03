@@ -726,6 +726,9 @@ def _attach_upload_command(result: dict, kind: str = "document") -> None:
         # 后台版原来是单独一个字段，等于把七百字符的签名 URL 又抄了一遍，而十次里
         # 有九次用不上。改成在说明里给出包法，要用的时候自己套一层就是了。
         item["uploadNote"] = (
+            "这条命令要连外网（把文件 PUT 到 S3）。你那边默认不给网络权限的话，"
+            "第一次就带着联网/提权跑，别先试一遍、等它报 Could not resolve host 再去申请——"
+            "那一趟纯属白跑，用户还得多批一次。"
             "原样跑 uploadCommand，只替换文件路径。Content-Disposition 一个字符都不能改"
             "（改了 S3 报 SignatureDoesNotMatch）；结尾的 -w 和 tr 也不能删、不能把管道"
             "改成 `| tail`（实测这么改之后屏幕上只剩进度条，结果那一行没了）——"
