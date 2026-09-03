@@ -78,7 +78,9 @@ async def test_finished_pdf_offers_both_layouts_without_urls_in_the_detail():
 
     result = await c.wait_for_translation("DOC1", timeout=5)
     assert result["code"] == "200"
-    assert "左右对照" in result["msg"] and "主动告诉用户" in result["msg"]
+    # 版式说明是说给用户听的，留在 msg；「不问也要说」是操作指令，走 agentNote
+    assert "左右对照" in result["msg"]
+    assert "主动告诉用户" in result["agentNote"] and "主动告诉用户" not in result["msg"]
     variants = result["data"]["availableVariants"]
     assert any("url_type=3" in v for v in variants)
     assert any("url_type=4" in v for v in variants)

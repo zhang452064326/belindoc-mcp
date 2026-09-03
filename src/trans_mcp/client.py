@@ -1446,11 +1446,11 @@ class TranslationClient:
             total = record["totalElapsed"]
             # 不管进度变没变，都要求把当前进度说出来。之前写的是「没变化就不必
             # 复述」，结果调用方在这些回合里什么都不说，界面上只剩一串省略号。
-            tail = (
-                "。把这行原样告诉用户，然后再次调用本工具继续等待。"
+            note = (
+                "把 msg 那行原样告诉用户，然后再次调用本工具继续等待。"
                 if changed else
                 # 同视频等待：没有新东西可说的那一轮不该产生任何输出
-                "。进度和上次完全一样，没有新东西可告诉用户："
+                "进度和上次完全一样，没有新东西可告诉用户："
                 "**不要输出任何文字**（连「继续等待」这类过场话也不要），"
                 "直接再次调用本工具继续等待。等到进度真的变了或任务结束，再开口。"
             )
@@ -1459,7 +1459,8 @@ class TranslationClient:
             # finished，剩下的话全在 msg 那一行里。
             return {
                 "code": "202",
-                "msg": status_line(total, polls=True) + tail,
+                "msg": status_line(total, polls=True) + "。",
+                "agentNote": note,
                 "data": {"orderNo": order_no, "finished": False},
             }
 
@@ -1497,8 +1498,8 @@ class TranslationClient:
                     _WAITS.pop(order_no, None)
                     return {
                         "code": "500",
-                        "msg": (
-                            f"任务已被终止：{reason}（累计等待 {_format_duration(total)}）。"
+                        "msg": f"任务已被终止：{reason}（累计等待 {_format_duration(total)}）。",
+                        "agentNote": (
                             "这是翻译服务侧的问题，不是上传或参数出错——文件还在，"
                             "fileObjectKey 依然有效，用相同参数重新调 translate_document 即可重试，"
                             "不要重新上传文件。但请先把失败原因告诉用户、问过用户之后再重试，"
@@ -1582,20 +1583,21 @@ class TranslationClient:
                     if others:
                         payload["availableVariants"] = others
                     offer = comparison_offer(data)
-                    return {
+                    done = {
                         "code": "200",
-                        "msg": (
-                            f"翻译完成（累计等待 {_format_duration(total)}）。"
-                            + (
-                                offer + "——这一句请主动告诉用户（他不问也要说：网页端"
-                                "把这两项明摆在下载菜单里，接口这边不说他就不知道有）。"
-                                "他要哪一版，就用 get_document_translation_result 按"
-                                "对应的 url_type 取，别自己替他决定只给纯译文。"
-                                if offer else ""
-                            )
-                        ),
+                        # offer 本身是说给用户听的（「还能导出双语对照」），留在 msg；
+                        # 「不问也要说」那句是操作指令，走 agentNote。
+                        "msg": f"翻译完成（累计等待 {_format_duration(total)}）。" + (offer or ""),
                         "data": payload,
                     }
+                    if offer:
+                        done["agentNote"] = (
+                            "msg 里那句版式说明请主动告诉用户（他不问也要说：网页端"
+                            "把这两项明摆在下载菜单里，接口这边不说他就不知道有）。"
+                            "他要哪一版，就用 get_document_translation_result 按"
+                            "对应的 url_type 取，别自己替他决定只给纯译文。"
+                        )
+                    return done
                 elif task_status in TASK_STATUS_PENDING:
                     # 未开始/解析中/翻译中，记录快照供返回时带出
                     status_text = doc_status_text(task_status)
@@ -2334,18 +2336,16 @@ class TranslationClient:
             # 重复就把对话刷满了。机器要用的只有 finished。
             return {
                 "code": "202",
-                "msg": (
-                    status_line(total, polls=True) + "。"
-                    + (
-                        "把这行原样告诉用户，然后再次调用本工具继续等待。"
-                        if changed else
-                        # 排队时进度能十几分钟一动不动。之前每轮都要求复述，屏幕上
-                        # 就是一屏一模一样的进度加一堆过场文字——轮询本身不该产生
-                        # 输出。没有新东西可说时就什么都别说，直接接着等。
-                        "进度和上次完全一样，没有新东西可告诉用户："
-                        "**不要输出任何文字**（连「继续等待」「仍在处理」这类过场话也不要），"
-                        "直接再次调用本工具继续等待。等到进度真的变了或任务结束，再开口。"
-                    )
+                "msg": status_line(total, polls=True) + "。",
+                "agentNote": (
+                    "把 msg 那行原样告诉用户，然后再次调用本工具继续等待。"
+                    if changed else
+                    # 排队时进度能十几分钟一动不动。之前每轮都要求复述，屏幕上
+                    # 就是一屏一模一样的进度加一堆过场文字——轮询本身不该产生
+                    # 输出。没有新东西可说时就什么都别说，直接接着等。
+                    "进度和上次完全一样，没有新东西可告诉用户："
+                    "**不要输出任何文字**（连「继续等待」「仍在处理」这类过场话也不要），"
+                    "直接再次调用本工具继续等待。等到进度真的变了或任务结束，再开口。"
                 ),
                 "data": {"orderNo": order_no, "finished": False},
             }
@@ -2386,7 +2386,10 @@ class TranslationClient:
                     "code": "200",
                     "msg": (
                         f"视频翻译完成（累计等待 {_format_duration(total)}）。"
-                        + (f"产出：{note}（这句请原样照抄，不要自己推断有没有配音）。" if note else "")
+                        + (f"产出：{note}。" if note else "")
+                    ),
+                    "agentNote": (
+                        ("msg 里那句产出说明请原样照抄，不要自己推断有没有配音。" if note else "")
                         + "请按 downloadNote 把签名链接原样完整交给用户。"
                     ),
                     "data": {
@@ -2435,12 +2438,16 @@ class TranslationClient:
                         f"视频任务已终止：{video_status_text(status)}"
                         + (f"，停在「{step_text}」这一步" if step_text else "")
                         + (f"，上游给的原因：{reason}" if reason
-                           else f"，上游没有给出失败原因——请如实告诉用户「{t('reason.unknown')}」，"
-                                "不要自己推测是音频、语言还是格式的问题")
+                           else f"，上游没有给出失败原因：{t('reason.unknown')}")
                         + f"。累计等待 {_format_duration(total)}。"
-                        "重新提交是一单新任务、会再扣一次费，所以必须先把上面这些告诉用户、"
-                        "问清楚要不要重做；同意后再带 retry_of_order_no 和 retry_confirmed=true "
-                        "调 translate_video，不带这两个参数会被直接拒绝。"
+                    ),
+                    "agentNote": (
+                        ("" if reason else
+                         "上游没给原因就照 msg 里那句如实说，不要自己推测是音频、"
+                         "语言还是格式的问题。")
+                        + "重新提交是一单新任务、会再扣一次费，所以必须先把 msg 里这些"
+                        "告诉用户、问清楚要不要重做；同意后再带 retry_of_order_no 和 "
+                        "retry_confirmed=true 调 translate_video，不带这两个参数会被直接拒绝。"
                     ),
                     "data": {
                         "orderNo": order_no,

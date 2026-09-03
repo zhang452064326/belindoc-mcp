@@ -1142,7 +1142,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_video_translation",
-        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 10）。视频任务通常要几分钟。finished=false 时请把返回 msg 里那行进度告诉用户——和上次一样也照样说一遍，不要沉默跳过，然后再次调用本工具继续等待，任务不会因此中断。完成后返回里带 translatedVideoUrl / targetSubtitlesUrl，要把它们原样完整交给用户——问号后面的签名参数一字都不能改；有效期以返回的 expiresAt / downloadNote 为准，不要按经验说成一小时。描述产物时请原样照抄 msg 和 outputNote 里那句产出说明（例如「未配音（保留原声），已嵌入译文字幕」），不要凭之前传过的参数自己推断有没有配音。该任务做过字幕改写的话，返回里给的就是改写后那一版（带 rewriteOrderNo），outputNote 会注明，别再回头用改写前的链接。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
+        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 10）。视频任务通常要几分钟。返回里 msg 是念给用户听的那一行、agentNote 是给你的操作指令：要转述就转述 msg，agentNote 一个字都不要念出去。finished=false 表示仍在处理，照 agentNote 的要求办：进度有变化就把 msg 那行原样告诉用户，和上次完全一样时一个字都不要输出（连「继续等待」这类过场话也不要），直接再次调用本工具继续等待，任务不会因此中断。完成后返回里带 translatedVideoUrl / targetSubtitlesUrl，要把它们原样完整交给用户——问号后面的签名参数一字都不能改；有效期以返回的 expiresAt / downloadNote 为准，不要按经验说成一小时。描述产物时请原样照抄 msg 或 outputNote 里那句产出说明（例如「未配音（保留原声），已嵌入译文字幕」），不要凭之前传过的参数自己推断有没有配音。该任务做过字幕改写的话，返回里给的就是改写后那一版（带 rewriteOrderNo），outputNote 会注明，别再回头用改写前的链接。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -1195,7 +1195,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 10）。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路），其他版式用 get_document_translation_result 取。这两条链接带签名，转述时必须把问号后面的参数一起原样给全，截断会 403。finished=false 表示仍在处理，照 msg 里的要求办：进度有变化就把那行原样告诉用户，和上次完全一样时一个字都不要输出，直接再次调用本工具继续等待，任务不会因此中断。若任务被服务端取消或失败，返回 code=500 且 data.failed=true，reason 是原因（如 BACKEND_CANCEL）——请先把原因告诉用户，问过用户之后再决定是否用相同参数重试 translate_document，文件不需要重新上传。",
+        description="等待翻译任务完成。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 10）。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路），其他版式用 get_document_translation_result 取。这两条链接带签名，转述时必须把问号后面的参数一起原样给全，截断会 403。返回里 msg 是念给用户听的那一行、agentNote 是给你的操作指令：要转述就转述 msg，agentNote 一个字都不要念出去。finished=false 表示仍在处理，照 agentNote 的要求办：进度有变化就把 msg 那行原样告诉用户，和上次完全一样时一个字都不要输出，直接再次调用本工具继续等待，任务不会因此中断。若任务被服务端取消或失败，返回 code=500 且 data.failed=true，reason 是原因（如 BACKEND_CANCEL）——请先把原因告诉用户，问过用户之后再决定是否用相同参数重试 translate_document，文件不需要重新上传。",
         inputSchema={
             "type": "object",
             "properties": {

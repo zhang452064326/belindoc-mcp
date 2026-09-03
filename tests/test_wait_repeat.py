@@ -40,15 +40,20 @@ async def test_only_a_changed_line_gets_repeated_in_full(fast_polling):
 
     first = await c.wait_for_video_translation("VO1", timeout=0.05)
     # 第一次：用户还没见过这行，要完整说出来
-    assert "把这行原样告诉用户" in first["msg"]
+    assert "把 msg 那行原样告诉用户" in first["agentNote"]
 
     second = await c.wait_for_video_translation("VO1", timeout=0.05)
     # 第二次进度一动没动：这一轮不该产生任何输出
-    assert "不要输出任何文字" in second["msg"]
-    assert "把这行原样告诉用户" not in second["msg"]
+    assert "不要输出任何文字" in second["agentNote"]
+    assert "把 msg 那行原样告诉用户" not in second["agentNote"]
 
     percent["value"] = 35.0
     third = await c.wait_for_video_translation("VO1", timeout=0.05)
     # 真变了就再完整说一次
-    assert "把这行原样告诉用户" in third["msg"]
+    assert "把 msg 那行原样告诉用户" in third["agentNote"]
     assert "35.0%" in third["msg"]
+
+    # msg 从头到尾只有念给用户的那一行，操作指令一个字都不许混进来
+    for out in (first, second, third):
+        assert "不要输出任何文字" not in out["msg"]
+        assert "调用本工具" not in out["msg"]
