@@ -108,10 +108,13 @@ URL_TYPE_SUPPORT = {
 # 各版式在 getTranslateFileDetail 详情里对应的字段。任务完成后这些地址就已经
 # 在详情里了，不必再为了拿链接单独调 getTranslateS3DownloadUrl。
 # 注意只有纯译文有 2 号兜底地址，对照版式没有——别对它们承诺国内线路。
+# 实测上游详情里对照版的字段是 xcomparisonS3Url / ycomparisonS3Url（小写 c，
+# 对应的 objectKey 字段还拼成了 ObjectKye）。驼峰那版一次都匹配不上，所以两种
+# 写法都认——认漏了就等于「详情里已经有地址」这条线索白丢。
 URL_TYPE_FIELDS = {
-    2: ("targetFileUrl", "targetFileUrl2"),
-    3: ("xComparisonS3Url", None),
-    4: ("yComparisonS3Url", None),
+    2: ("targetFileUrl",),  # 国内兜底线路 targetFileUrl2 单独取，别混进版式表
+    3: ("xcomparisonS3Url", "xComparisonS3Url"),
+    4: ("ycomparisonS3Url", "yComparisonS3Url"),
 }
 VIDEO_PREFIX = "/external/videoTranslate"
 # 账户信息（钱包额度 / 订阅权益）。上游 2026-09-02 才开放到 /external，
@@ -454,13 +457,23 @@ def video_products(data: dict) -> tuple:
 COMPARISON_BY_TYPE = {"PDF": (3, 4), "EPUB": (4,)}
 
 
+# 认得出的文件类型。上游这个字段不保证是扩展名（见过给编号、给中文说法的），
+# 认不出就别硬用——那会让一份 PDF 被当成「没有对照版式的类型」，
+# 用户在交付现场压根不知道还能要左右/上下对照。
+KNOWN_DOC_TYPES = {
+    "PDF", "EPUB", "DOCX", "DOC", "PPTX", "PPT", "XLSX", "XLS", "TXT",
+    "PNG", "JPG", "JPEG", "IMAGE",
+}
+
+
 def doc_file_type(data: dict) -> str:
-    """记录里的 fileType；缺了就按文件名后缀兜底"""
+    """这份文件是什么类型：认得的 fileType 优先，认不出就按文件名后缀兜底"""
     file_type = str(data.get("fileType") or "").strip().upper()
-    if file_type:
+    if file_type in KNOWN_DOC_TYPES:
         return file_type
     name = data.get("sourceFileName") or ""
-    return name.rsplit(".", 1)[-1].upper() if "." in name else ""
+    suffix = name.rsplit(".", 1)[-1].upper() if "." in name else ""
+    return suffix or file_type
 
 
 def comparison_variants(data: dict) -> tuple:
@@ -468,12 +481,22 @@ def comparison_variants(data: dict) -> tuple:
     return COMPARISON_BY_TYPE.get(doc_file_type(data), ())
 
 
-def comparison_offer(data: dict) -> str:
+def offered_variants(data: dict) -> tuple:
+    """实际报得出的对照版式：详情里已经有地址的 ∪ 这个类型本来就支持的
+
+    只按类型猜，遇上认不出的 fileType 就会漏报；只看详情里的地址，任务刚完成
+    时对照版可能还没生成。两边取并集，哪一边知道都算数。
+    """
+    found = set(_available_variants(data)) | set(comparison_variants(data))
+    return tuple(sorted(found - {2}))
+
+
+def comparison_offer(data: dict, variants=None) -> str:
     """完成时主动报出还能要哪种对照版
 
     网页端把这两项明摆在下载菜单里，接口这边不说，用户就永远不知道有这功能。
     """
-    variants = comparison_variants(data)
+    variants = comparison_variants(data) if variants is None else tuple(variants)
     if not variants:
         return ""
     return t("download.doc.layouts.pdf" if 3 in variants else "download.doc.layouts.epub")
@@ -482,9 +505,11 @@ def comparison_offer(data: dict) -> str:
 def _available_variants(data: dict) -> dict:
     """详情里实际存在的版式 -> 地址。比按文件类型猜准，因为这是上游真给了的。"""
     found = {}
-    for url_type, (field, _) in URL_TYPE_FIELDS.items():
-        if data.get(field):
-            found[url_type] = data[field]
+    for url_type, fields in URL_TYPE_FIELDS.items():
+        for field in fields:
+            if field and data.get(field):
+                found[url_type] = data[field]
+                break
     return found
 
 # 下载链接是带签名的：CloudFront 靠 Signature/Key-Pair-Id，国内线路靠 sign，
@@ -1574,11 +1599,8 @@ class TranslationClient:
                     # 这里只列出有哪些，不带地址——所有下载都走下载接口，
                     # 免得混进没做水印控制的链接。
                     # 详情里已经有地址的 ∪ 这个类型本来就支持的，去掉纯译文自己
-                    offered = (set(variants) | set(comparison_variants(data))) - {2}
-                    others = [
-                        f"url_type={n} {URL_TYPE_LABELS[n]}"
-                        for n in sorted(offered)
-                    ]
+                    offered = offered_variants(data)
+                    others = [f"url_type={n} {URL_TYPE_LABELS[n]}" for n in offered]
                     payload = {
                         "orderNo": order_no,
                         "finished": True,
@@ -1597,8 +1619,9 @@ class TranslationClient:
                         "downloadUrlCN": target_url_cn,
                         "downloadNote": (
                             t("download.doc.watermark" if watermark else "download.doc.clean")
-                            + "downloadUrlCN 是同一份文件的国内兜底线路"
-                            "（只有纯译文有，对照版式没有兜底线路），前者慢或不通时改用后者。"
+                            + "downloadUrlCN 是同一份文件的国内兜底线路，"
+                            "前者慢或不通时改用后者（对照版式也有国内线路，"
+                            "get_document_translation_result 会一并返回 url2）。"
                             + _URL_VERBATIM_NOTE
                             + _expiry_note(target_url)
                             + (
@@ -1611,7 +1634,7 @@ class TranslationClient:
                     }
                     if others:
                         payload["availableVariants"] = others
-                    offer = comparison_offer(data)
+                    offer = comparison_offer(data, offered)
                     done = {
                         "code": "200",
                         # offer 本身是说给用户听的（「还能导出双语对照」），留在 msg；
@@ -1619,6 +1642,12 @@ class TranslationClient:
                         "msg": f"翻译完成（累计等待 {_format_duration(total)}）。" + (offer or ""),
                         "data": payload,
                     }
+                    if offer:
+                        # 实测两次：这句话跟在「翻译完成…」后面就是活不下来——模型把
+                        # msg 改写成自己的卡片，第一句之后全丢，downloadNote 的尾巴
+                        # 同样没跟出来。所以再单独发一个 content 块，纯用户文案、
+                        # 独占一段，摆在 JSON 前面，别再指望它从长串里把这句捞出来。
+                        done["sayToUser"] = offer + t("download.doc.layouts.cost")
                     if offer:
                         done["agentNote"] = (
                             "msg 里那句版式说明请主动告诉用户（他不问也要说：网页端"

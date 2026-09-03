@@ -19,7 +19,7 @@ from .client import (
     VIDEO_STATUS_DONE,
     annotate_key_error,
     comparison_offer,
-    comparison_variants,
+    offered_variants,
     key_never_uploaded,
     slim_video_record,
     strip_long_urls,
@@ -861,9 +861,10 @@ async def _doc_status(client, order_no: str) -> dict:
     # 完成的 PDF / EPUB 还能取对照版式。这条查询也是交付现场之一，同样要主动报，
     # 不能只在 wait_for_translation 那一条路上说。
     if data.get("status") == TASK_STATUS_DONE:
-        offer = comparison_offer(data)
+        variants = offered_variants(data)
+        offer = comparison_offer(data, variants)
         if offer:
-            slim["comparisonVariants"] = list(comparison_variants(data))
+            slim["comparisonVariants"] = list(variants)
             result["msg"] = (
                 offer + "——这一句请主动告诉用户（他不问也要说）。他要哪一版，"
                 "就用 get_document_translation_result 按对应 url_type 取："
@@ -902,6 +903,21 @@ async def _list_documents(client, page_num: int, page_size: int, status) -> dict
 
 async def _batch_documents(client, batch_no: str) -> dict:
     return _strip_doc_records(await client.search_translate_file_by_batch_no(batch_no))
+
+
+def _blocks(result) -> list:
+    """工具结果拆成内容块
+
+    绝大多数工具就一个 JSON 块。带 sayToUser 的（目前是文档翻译完成时那句「还能
+    要对照版」）多发一个纯文案块，且排在 JSON 前面：这句话夹在 msg 里、或者挂在
+    几百字符签名链接后面的 downloadNote 尾巴上，实测被模型丢过两次。
+    """
+    say = result.pop("sayToUser", None) if isinstance(result, dict) else None
+    blocks = []
+    if say:
+        blocks.append(TextContent(type="text", text=say))
+    blocks.append(TextContent(type="text", text=_to_json(result)))
+    return blocks
 
 
 def _to_json(result) -> str:
@@ -1032,7 +1048,7 @@ TOOLS = [
     ),
     Tool(
         name="get_document_translation_result",
-        description="获取文档翻译结果下载链接。url_type 决定版式：1=原文、2=纯译文（默认）、3=横向对照（左右并排，仅 PDF）、4=纵向对照（原文与译文上下排列，仅 PDF 与 EPUB）。要译文不要传 1。返回的 url 走 CloudFront，url2 为国内兜底线路。两条链接都带签名参数，转述给用户时必须连问号后面的 Signature/Key-Pair-Id/expires/sign 一起原样给全，截断或缩短会导致 403 MissingKey。",
+        description="获取文档翻译结果下载链接。url_type 决定版式：1=原文、2=纯译文（默认）、3=横向对照（左右并排，仅 PDF）、4=纵向对照（原文与译文上下排列，仅 PDF 与 EPUB）。对照版是取的时候现合成的，第一次取可能要多等一会儿——慢是正常的，别当成失败去重试，更不要因此改回纯译文；也正因为要合成，翻译完成时不会替用户预先取好，用户点名要哪一版再来调。要译文不要传 1。返回的 url 走 CloudFront，url2 为国内兜底线路。两条链接都带签名参数，转述给用户时必须连问号后面的 Signature/Key-Pair-Id/expires/sign 一起原样给全，截断或缩短会导致 403 MissingKey。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -1497,10 +1513,7 @@ def register_tools_per_request(server: Server, borrow):
         try:
             async with borrow(ctx) as client:
                 result = await build_tool_handlers(client)[tool_name](args)
-            return CallToolResult(
-                content=[TextContent(type="text", text=_to_json(result))],
-                isError=False
-            )
+            return CallToolResult(content=_blocks(result), isError=False)
         except Exception as e:
             return CallToolResult(
                 content=[TextContent(type="text", text=f"错误: {str(e)}")],

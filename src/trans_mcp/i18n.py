@@ -117,6 +117,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "翻译服务暂时不可用（{code}）：上游正忙或并发任务已满，这不是参数错，也和上传无关。",
         "download.doc.layouts.pdf": "这份 PDF 除了纯译文，还可以下载两种双语对照版：左右对照（原文和译文并排）、上下对照（原文在上、译文在下）。",
         "download.doc.layouts.epub": "这份 EPUB 除了纯译文，还可以下载上下对照的双语版（原文在上、译文在下）；EPUB 是流式排版，没有左右并排那一种。",
+        "download.doc.layouts.cost": "对照版是要现合成的，取的时候会多等一会儿，所以默认只给了纯译文——要哪一版说一声就行。",
     },
     "zh-Hant": {
         "status.video.0": "未開始",
@@ -209,6 +210,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "翻譯服務暫時不可用（{code}）：上游正忙或並發任務已滿，這不是參數錯，也和上傳無關。",
         "download.doc.layouts.pdf": "這份 PDF 除了純譯文，還可以下載兩種雙語對照版：左右對照（原文和譯文並排）、上下對照（原文在上、譯文在下）。",
         "download.doc.layouts.epub": "這份 EPUB 除了純譯文，還可以下載上下對照的雙語版（原文在上、譯文在下）；EPUB 是流式排版，沒有左右並排那一種。",
+        "download.doc.layouts.cost": "對照版是要現合成的，取的時候會多等一會兒，所以預設只給了純譯文——要哪一版說一聲就行。",
     },
     "en": {
         "status.video.0": "Not started",
@@ -301,6 +303,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "The translation service is temporarily unavailable ({code}): the upstream is busy or the concurrent-job slots are full. This is not a parameter error and has nothing to do with the upload.",
         "download.doc.layouts.pdf": "Besides the translation-only file, this PDF is also available in two bilingual layouts: side-by-side (source and translation in parallel columns) and stacked (source above, translation below).",
         "download.doc.layouts.epub": "Besides the translation-only file, this EPUB is also available stacked bilingually (source above, translation below). EPUB reflows, so there is no side-by-side layout.",
+        "download.doc.layouts.cost": "The bilingual layouts are generated on demand and take a little longer to prepare, so only the translation-only file is handed over by default — just say which layout you want.",
     },
     "ja": {
         "status.video.0": "未開始",
@@ -393,6 +396,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "翻訳サービスが一時的に利用できません（{code}）。上流が混雑しているか同時実行枠が埋まっています。パラメータの誤りでもアップロードの問題でもありません。",
         "download.doc.layouts.pdf": "この PDF は訳文のみのファイルに加えて、対訳版も 2 種類ダウンロードできます：左右対照（原文と訳文を横に並べる）と上下対照（原文が上、訳文が下）。",
         "download.doc.layouts.epub": "この EPUB は訳文のみのファイルに加えて、上下対照の対訳版もダウンロードできます（原文が上、訳文が下）。EPUB はリフロー型のため、左右対照はありません。",
+        "download.doc.layouts.cost": "対訳版はその都度生成するため、取得に少し時間がかかります。既定では訳文のみをお渡ししていますので、必要な対訳版があれば言ってください。",
     },
     "ko": {
         "status.video.0": "시작 전",
@@ -485,6 +489,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "번역 서비스를 일시적으로 사용할 수 없습니다({code}). 상위 서비스가 혼잡하거나 동시 작업 슬롯이 가득 찼습니다. 매개변수 오류도, 업로드 문제도 아닙니다.",
         "download.doc.layouts.pdf": "이 PDF는 번역본 외에도 두 가지 대역본을 받을 수 있습니다: 좌우 대조(원문과 번역문을 나란히)와 상하 대조(원문 위, 번역문 아래).",
         "download.doc.layouts.epub": "이 EPUB은 번역본 외에 상하 대조 대역본을 받을 수 있습니다(원문 위, 번역문 아래). EPUB은 가변 레이아웃이라 좌우 대조는 없습니다.",
+        "download.doc.layouts.cost": "대역본은 요청할 때 생성되므로 받는 데 시간이 조금 더 걸립니다. 기본적으로는 번역본만 드리니 원하는 대역본을 말씀해 주세요.",
     },
     "de": {
         "status.video.0": "Nicht gestartet",
@@ -577,6 +582,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "Der Übersetzungsdienst ist vorübergehend nicht verfügbar ({code}): Der Anbieter ist ausgelastet oder die Slots für parallele Aufträge sind belegt. Kein Parameterfehler und kein Upload-Problem.",
         "download.doc.layouts.pdf": "Neben der reinen Übersetzung gibt es dieses PDF auch in zwei zweisprachigen Layouts: nebeneinander (Original und Übersetzung in parallelen Spalten) und untereinander (Original oben, Übersetzung darunter).",
         "download.doc.layouts.epub": "Neben der reinen Übersetzung gibt es dieses EPUB auch zweisprachig untereinander (Original oben, Übersetzung darunter). EPUB fließt um, daher gibt es kein Nebeneinander-Layout.",
+        "download.doc.layouts.cost": "Die zweisprachigen Layouts werden erst bei Bedarf erzeugt und brauchen etwas länger. Standardmäßig gibt es nur die reine Übersetzung – sag einfach, welches Layout du möchtest.",
     },
     "fr": {
         "status.video.0": "Non démarré",
@@ -669,6 +675,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "Le service de traduction est temporairement indisponible ({code}) : le service amont est occupé ou les créneaux de tâches simultanées sont pleins. Ce n'est ni une erreur de paramètre ni un problème d'envoi.",
         "download.doc.layouts.pdf": "Outre le fichier traduit seul, ce PDF est aussi disponible en deux mises en page bilingues : côte à côte (source et traduction en colonnes parallèles) et superposée (source au-dessus, traduction en dessous).",
         "download.doc.layouts.epub": "Outre le fichier traduit seul, cet EPUB est aussi disponible en bilingue superposé (source au-dessus, traduction en dessous). L'EPUB étant à flux dynamique, il n'y a pas de mise en page côte à côte.",
+        "download.doc.layouts.cost": "Les mises en page bilingues sont générées à la demande et demandent un peu plus de temps. Par défaut, seule la traduction seule est fournie — dites simplement quelle mise en page vous voulez.",
     },
     "ru": {
         "status.video.0": "Не начато",
@@ -761,6 +768,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "Служба перевода временно недоступна ({code}): сервис занят или исчерпаны слоты параллельных задач. Это не ошибка параметров и не проблема загрузки.",
         "download.doc.layouts.pdf": "Кроме файла только с переводом, этот PDF доступен в двух двуязычных вариантах: рядом (оригинал и перевод в параллельных колонках) и друг под другом (оригинал сверху, перевод снизу).",
         "download.doc.layouts.epub": "Кроме файла только с переводом, этот EPUB доступен в двуязычном варианте друг под другом (оригинал сверху, перевод снизу). EPUB имеет перетекающую вёрстку, поэтому варианта «рядом» нет.",
+        "download.doc.layouts.cost": "Двуязычные варианты формируются по запросу и готовятся чуть дольше, поэтому по умолчанию выдаётся только перевод — просто скажите, какой вариант нужен.",
     },
     "ar": {
         "status.video.0": "لم يبدأ",
@@ -853,6 +861,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "error.biz.transient": "خدمة الترجمة غير متاحة مؤقتًا ({code}): الخدمة مشغولة أو امتلأت خانات المهام المتزامنة. ليست خطأ في المعامِلات ولا مشكلة في الرفع.",
         "download.doc.layouts.pdf": "إضافةً إلى ملف الترجمة وحده، يتوفر هذا الملف بصيغتين ثنائيتي اللغة: جنبًا إلى جنب (الأصل والترجمة في عمودين متوازيين) وفوق بعضهما (الأصل أعلى والترجمة أسفل).",
         "download.doc.layouts.epub": "إضافةً إلى ملف الترجمة وحده، يتوفر هذا الملف بصيغة ثنائية اللغة فوق بعضها (الأصل أعلى والترجمة أسفل). وبما أن EPUB تنسيق متدفق، فلا يوجد تخطيط جنبًا إلى جنب.",
+        "download.doc.layouts.cost": "تُنشأ الصيغ ثنائية اللغة عند الطلب وتستغرق وقتًا أطول قليلًا، لذلك يُسلَّم ملف الترجمة وحده افتراضيًا — يكفي أن تخبرنا بالصيغة التي تريدها.",
     },
 }
 

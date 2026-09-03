@@ -133,3 +133,84 @@ async def test_offer_follows_the_locale():
         assert "side-by-side" in out["msg"]
     finally:
         i18n.reset_locale(token)
+
+
+def test_unrecognized_file_type_falls_back_to_the_extension():
+    """实测一次：一份 PDF 交付时一个字都没提对照版式
+
+    上游的 fileType 不保证是扩展名。原来只要它非空就照单全收，于是 "1" 这种
+    值让 COMPARISON_BY_TYPE 查不到东西，comparison_offer 返回空串——交付现场
+    就只剩纯译文，用户根本不知道还能要左右/上下对照。认不出的一律退回后缀。
+    """
+    assert doc_file_type({"fileType": "1", "sourceFileName": "声环境功能.pdf"}) == "PDF"
+    assert doc_file_type({"fileType": "application/pdf", "sourceFileName": "a.pdf"}) == "PDF"
+    assert "左右对照" in comparison_offer({"fileType": "1", "sourceFileName": "a.pdf"})
+    # 认不出、又没有后缀可退，就保持原样，别凭空造一个类型出来
+    assert doc_file_type({"fileType": "怪东西", "sourceFileName": "noext"}) == "怪东西"
+
+
+def test_offer_also_comes_from_urls_the_detail_already_has():
+    """类型认不出时，详情里真给了对照版地址也算数"""
+    data = {"fileType": "1", "sourceFileName": "noext", "xComparisonS3Url": "https://x"}
+    assert client_mod.offered_variants(data) == (3,)
+    assert "左右对照" in comparison_offer(data, client_mod.offered_variants(data))
+    # 纯译文自己不算「另有版式」
+    assert client_mod.offered_variants(
+        {"fileType": "DOCX", "sourceFileName": "a.docx", "targetFileUrl": "https://t"}
+    ) == ()
+
+
+def test_detail_field_spelling_from_the_real_upstream():
+    """实测详情里是 xcomparisonS3Url / ycomparisonS3Url（小写 c）
+
+    原来只认驼峰那版，于是「详情里已经有对照版地址」这条线索一次都没生效过。
+    两种写法都认。
+    """
+    real = {"fileType": "PDF", "sourceFileName": "a.pdf",
+            "xcomparisonS3Url": "https://x", "ycomparisonS3Url": "https://y"}
+    assert client_mod._available_variants(real) == {3: "https://x", 4: "https://y"}
+    camel = {"fileType": "1", "sourceFileName": "noext", "yComparisonS3Url": "https://y"}
+    assert client_mod._available_variants(camel) == {4: "https://y"}
+    # 纯译文的国内兜底线路不是一种版式，别混进来
+    assert client_mod._available_variants(
+        {"targetFileUrl2": "https://cn"}
+    ) == {}
+
+
+def test_the_offer_gets_its_own_content_block():
+    """夹在 msg 里活不下来，就单独发一块，且排在 JSON 前面"""
+    from trans_mcp.tools import _blocks
+
+    result = {"code": "200", "msg": "翻译完成。", "sayToUser": "还能要对照版。",
+              "data": {"finished": True}}
+    blocks = _blocks(result)
+    assert len(blocks) == 2
+    assert blocks[0].text == "还能要对照版。"          # 纯用户文案，不掺操作指令
+    assert "sayToUser" not in blocks[1].text          # 别在 JSON 里再抄一遍
+    assert '"finished": true' in blocks[1].text
+    # 没有这句话的工具照旧只有一块
+    assert len(_blocks({"code": "200", "data": {}})) == 1
+
+
+@pytest.mark.asyncio
+async def test_finished_pdf_puts_the_offer_in_say_to_user():
+    c = TranslationClient("test_api_key")
+    detail = {
+        "code": "200",
+        "data": {
+            "status": 3, "sourceFileName": "spec.pdf", "fileType": "PDF",
+            "sourceLanguage": "en", "targetLanguage": "zh-CN", "model": "Gemini-2.5-Flash",
+            "targetFileUrl": "https://cdn/x.pdf?Expires=99999999999&Signature=s",
+        },
+    }
+    c.get_translate_file_detail = lambda o: asyncio.sleep(0, result=detail)
+    c.get_translate_s3_download_url = lambda o, u, w: asyncio.sleep(
+        0, result={"url": "https://cdn/x.pdf?Expires=99999999999&Signature=s"}
+    )
+    result = await c.wait_for_translation("DOC3", timeout=5)
+    say = result["sayToUser"]
+    assert "左右对照" in say
+    # 合成要等这件事也要说，用户才知道为什么默认没给
+    assert "多等一会儿" in say
+    # 操作指令一个字都不许混进这一块
+    assert "调用" not in say and "url_type" not in say
