@@ -22,6 +22,29 @@ Authorization: Bearer ft_kjo...   Authorization: Bearer ft_abc...
 - ✅ 可以统计每个人的用量
 - ✅ Key 泄露只影响个人
 
+API Key 是每个请求各带各的：同一条会话里换了 Bearer，后面的调用就走新的那把 key，
+服务端不会把握手时那一把记下来复用。
+
+---
+
+## 传输方式
+
+服务端跑的是标准 **Streamable HTTP**（SSE 响应体 + `Mcp-Session-Id` + 客户端把答复
+POST 回来），不是一问一答的 JSON-RPC。这不只是协议合规问题，两件正事靠它：
+
+- **扣费确认能问到人**。视频翻译、字幕改写要真扣额度，服务端通过 elicitation 直接
+  向用户弹窗确认。没有回传通道时只能退回 `user_confirmed` 这类布尔量——那永远是
+  模型自己填的，服务端无法验证背后到底有没有问过。
+- **等待期间有进度**。等一个视频要几分钟，`notifications/progress` 是这中间唯一能
+  出声的通道。
+
+想确认某个客户端到底吃不吃 elicitation，调一次 `probe_elicitation`：它不翻译、不
+提交任务、不扣额度，只把客户端声明的能力报出来，并在支持时真弹一次提问。
+
+早期版本上的 `/sse` 和 `/message` 两个端点已删除——那是上一版手搓传输的残骸，
+`/sse` 自己伪造了一条 initialize 然后挂着不动，任何标准 MCP 客户端都握不上手。
+现在只有两个端点：MCP 端点（默认 `/mcp`）和 `/health`。
+
 ---
 
 ## 部署步骤

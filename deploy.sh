@@ -64,12 +64,17 @@ docker-compose ps
 echo ""
 IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')
 echo "MCP 端点: http://$IP:$PORT$MCP_PATH"
+echo "健康检查: http://$IP:$PORT/health"
 echo ""
 echo -e "${YELLOW}本机配置:${NC}"
-echo '{
+cat << EOF
+{
   "mcpServers": {
     "trans-mcp": {
-      "url": "http://'$SERVER_IP':'$PORT'/sse"
+      "type": "streamablehttp",
+      "url": "http://YOUR_SERVER_IP:$PORT$MCP_PATH",
+      "headers": { "Authorization": "Bearer 你的API密钥" }
     }
   }
-}'
+}
+EOF

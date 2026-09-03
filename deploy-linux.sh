@@ -90,7 +90,6 @@ echo "查看日志: sudo journalctl -u $SERVICE_NAME -f"
 echo ""
 IP=$(hostname -I | awk '{print $1}')
 echo "MCP 端点: http://$IP:$PORT$MCP_PATH"
-echo "SSE 端点: http://$IP:$PORT/sse"
 echo "健康检查: http://$IP:$PORT/health"
 echo ""
 echo -e "${YELLOW}本机配置:${NC}"

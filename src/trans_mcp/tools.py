@@ -2,6 +2,7 @@
 
 import contextvars
 import sys
+from contextlib import asynccontextmanager
 from typing import Optional
 from mcp.server import Server
 from mcp.types import (
@@ -50,8 +51,8 @@ VOICE_ROLE_CHOICES = ("No", "clone")
 _OCR_CHECK_WAIT = 8.0
 
 # 当前这次 tools/call 的 ServerRequestContext。工具处理器签名里只有 args，拿不到
-# 会话，而 elicitation（服务端反过来向用户提问）必须走 ctx.session。stdio 模式在
-# handle_call_tool 里塞进来；HTTP 模式是纯请求/响应，没有回传通道，这里恒为 None。
+# 会话，而 elicitation（服务端反过来向用户提问）必须走 ctx.session。handle_call_tool
+# 进处理器前塞进来，stdio 和 HTTP（Streamable HTTP）两种传输都有。
 _REQUEST_CTX: contextvars.ContextVar = contextvars.ContextVar("trans_mcp_request_ctx", default=None)
 
 
@@ -65,14 +66,12 @@ async def _probe_elicitation(args) -> dict:
     ctx = _REQUEST_CTX.get()
     if ctx is None:
         return {"code": "200", "data": {
-            "transport": "http",
+            "transport": "unknown",
             "backChannel": False,
             "elicitationUsable": False,
             "verdict": (
-                "本次部署走 HTTP 请求/响应：每个 JSON-RPC 请求返回一次 json_response，"
-                "服务端没有向客户端发起请求的通道，elicitation 在这种传输上根本发不出去，"
-                "与客户端支不支持无关。要用得先把 HTTP 传输改成真正的 Streamable HTTP"
-                "（SSE 响应体 + 会话 id + 客户端回 POST），或者改走 stdio。"
+                "这次调用没拿到会话上下文，服务端无法向客户端发起提问。"
+                "正常的 stdio 和 Streamable HTTP 都不该走到这里，请把这句原样反馈。"
             ),
         }}
 
@@ -83,7 +82,8 @@ async def _probe_elicitation(args) -> dict:
     info = getattr(params, "client_info", None)
     declared = bool(caps and getattr(caps, "elicitation", None))
     out = {
-        "transport": "stdio",
+        # 传输层给每条消息挂了它自己的 HTTP 请求；stdio 上没有这东西
+        "transport": "streamable-http" if getattr(ctx, "request", None) is not None else "stdio",
         "backChannel": True,
         "clientInfo": info.model_dump(exclude_none=True) if info else None,
         "protocolVersion": getattr(session, "protocol_version", None),
@@ -136,8 +136,7 @@ def _progress_reporter():
     等一个视频要几分钟，两次返回之间客户端界面是完全静止的——用户既看不到
     进度也看不到已经等了多久。notifications/progress 是这中间唯一能出声的通道。
     只有客户端在请求 _meta 里带了 progressToken 才有权推送（没带就返回 None，
-    白推是违反协议的）；HTTP 模式是一问一答的 JSON-RPC，没有 ctx、也没有回推
-    通道，同样返回 None。
+    白推是违反协议的）。stdio 和 Streamable HTTP 都有回推通道，两边一样能推。
     """
     ctx = _REQUEST_CTX.get()
     session = getattr(ctx, "session", None)
@@ -166,7 +165,7 @@ def _progress_reporter():
 
 
 def _elicitation_session():
-    """能直接问到真人的会话；拿不到就返回 None（HTTP 传输，或客户端没声明能力）。"""
+    """能直接问到真人的会话；客户端没声明 elicitation 能力就返回 None。"""
     ctx = _REQUEST_CTX.get()
     if ctx is None:
         return None
@@ -1395,27 +1394,46 @@ def build_tool_handlers(client: TranslationClient):
     return {name: with_locale(fn) for name, fn in handlers.items()}
 
 
+# 工具名的唯一真相是处理器表本身，别再手抄一份。client 只在 lambda 体里用到，
+# 传 None 建一张表纯粹为了取键名。
+TOOL_NAMES = frozenset(build_tool_handlers(None))
+
+
 def register_tools(server: Server, client: TranslationClient):
-    """注册所有 MCP 工具（stdio 模式）"""
-    TOOL_HANDLERS = build_tool_handlers(client)
-    
-    # 注册工具列表处理器
+    """注册所有 MCP 工具（stdio 模式：全程就一条上游连接）"""
+
+    @asynccontextmanager
+    async def borrow(ctx):
+        yield client
+
+    register_tools_per_request(server, borrow)
+
+
+def register_tools_per_request(server: Server, borrow):
+    """注册所有 MCP 工具，上游连接每次调用现借。
+
+    HTTP 模式下 API Key 是每个请求自己带的（服务器不存密钥），所以 client 不能在
+    注册时定死。borrow(ctx) 是个异步上下文管理器：进去拿到本次该用的 client，
+    出来把它还回池子。
+    """
+
     async def handle_list_tools(ctx, params: PaginatedRequestParams) -> ListToolsResult:
         return ListToolsResult(tools=TOOLS)
-    
-    # 注册工具调用处理器
+
     async def handle_call_tool(ctx, params: CallToolRequestParams) -> CallToolResult:
         tool_name = params.name
         args = params.arguments or {}
-        
-        if tool_name not in TOOL_HANDLERS:
+
+        if tool_name not in TOOL_NAMES:
             return CallToolResult(
                 content=[TextContent(type="text", text=f"未知工具: {tool_name}")]
             )
-        
+
+        # elicitation 和进度通知都要从 ctx 拿回传通道，进处理器前先放好
         token = _REQUEST_CTX.set(ctx)
         try:
-            result = await TOOL_HANDLERS[tool_name](args)
+            async with borrow(ctx) as client:
+                result = await build_tool_handlers(client)[tool_name](args)
             return CallToolResult(
                 content=[TextContent(type="text", text=_to_json(result))],
                 isError=False
@@ -1427,7 +1445,7 @@ def register_tools(server: Server, client: TranslationClient):
             )
         finally:
             _REQUEST_CTX.reset(token)
-    
+
     # add_request_handler 要的是 params 模型（RequestParams 的子类），
     # 不是 ListToolsRequest / CallToolRequest 这种 Request 模型。
     server.add_request_handler("tools/list", PaginatedRequestParams, handle_list_tools)

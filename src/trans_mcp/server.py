@@ -5,6 +5,7 @@ import os
 import sys
 from mcp.server.lowlevel.server import Server
 from mcp.server.stdio import stdio_server
+from . import __version__
 from .client import TranslationClient
 from .tools import register_tools
 
@@ -20,7 +21,7 @@ def main():
         return
 
     # 创建 MCP Server
-    server = Server("trans-mcp")
+    server = Server("trans-mcp", version=__version__)
 
     # 创建 API 客户端
     client = TranslationClient(api_key)

@@ -10,10 +10,13 @@ readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=2.0.0",
     "httpx>=0.25.0",
     "pydantic>=2.0.0",
-    "aiohttp>=3.9.0",
+    # HTTP 模式的传输层：MCP SDK 的 Streamable HTTP 管理器是 ASGI 的，
+    # 挂在 Starlette 上、由 uvicorn 跑。（之前手搓的那套用的是 aiohttp）
+    "starlette>=0.37.0",
+    "uvicorn>=0.27.0",
 ]
 
 [project.optional-dependencies]
