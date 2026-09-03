@@ -1197,7 +1197,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_video_translation",
-        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 10）。视频任务通常要几分钟。返回里 msg 是念给用户听的那一行、agentNote 是给你的操作指令：要转述就转述 msg，agentNote 一个字都不要念出去。finished=false 表示仍在处理，照 agentNote 的要求办：进度有变化就把 msg 那行原样告诉用户，和上次完全一样时一个字都不要输出（连「继续等待」这类过场话也不要），直接再次调用本工具继续等待，任务不会因此中断。完成后返回里带 translatedVideoUrl / targetSubtitlesUrl，要把它们原样完整交给用户——问号后面的签名参数一字都不能改；有效期以返回的 expiresAt / downloadNote 为准，不要按经验说成一小时。描述产物时请原样照抄 msg 或 outputNote 里那句产出说明（例如「未配音（保留原声），已嵌入译文字幕」），不要凭之前传过的参数自己推断有没有配音。该任务做过字幕改写的话，返回里给的就是改写后那一版（带 rewriteOrderNo），outputNote 会注明，别再回头用改写前的链接。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
+        description="等待视频翻译任务完成。提交 translate_video 后就用它跟进，不要自己反复调 get_video_translation_status。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则等满本轮的等待时长（不传 timeout 时由本工具自适应：10 秒起，进度一直不动就逐轮翻倍到 45 秒封顶，省掉那些什么都说不出来的空转往返）。视频任务通常要几分钟。返回里 msg 是念给用户听的那一行、agentNote 是给你的操作指令：要转述就转述 msg，agentNote 一个字都不要念出去。finished=false 表示仍在处理，照 agentNote 的要求办：进度有变化就把 msg 那行原样告诉用户，和上次完全一样时一个字都不要输出（连「继续等待」这类过场话也不要），直接再次调用本工具继续等待，任务不会因此中断。完成后返回里带 translatedVideoUrl / targetSubtitlesUrl，要把它们原样完整交给用户——问号后面的签名参数一字都不能改；有效期以返回的 expiresAt / downloadNote 为准，不要按经验说成一小时。描述产物时请原样照抄 msg 或 outputNote 里那句产出说明（例如「未配音（保留原声），已嵌入译文字幕」），不要凭之前传过的参数自己推断有没有配音。该任务做过字幕改写的话，返回里给的就是改写后那一版（带 rewriteOrderNo），outputNote 会注明，别再回头用改写前的链接。任务失败或被取消时返回 code=500 且 data.failed=true，reason 是原因——请先告诉用户，问过之后再决定是否重新提交，重提会再次扣费。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -1207,7 +1207,7 @@ TOOLS = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "本次最多等待的秒数，默认 10。一轮只等这么点时间，是为了让进度尽快回到用户面前；进度没变化的那些轮次本工具会明确要求你不要输出任何文字，直接接着调，所以轮次多不等于屏幕上话多。不确定就别传。到点未完成会返回当前进度而非报错，可再次调用继续等待。"
+                    "description": "本次最多等待的秒数。**正常情况不要传**：不传时本工具自己掌握节奏——起步 10 秒，好让第一次进度尽快回到用户面前，之后进度每连着一轮没变就把等待翻一倍（10→20→40，上限 45 秒），进度一变又回到 10 秒。这么做是因为进度不动的那些轮次你什么都不该输出，可你每回来一次都是一整轮往返、上下文重发一遍，界面上还多一行空回合。传了本参数就按你给的秒数严格执行、不再自适应；传大值不会多打上游（轮询间隔是内部定的，与本参数无关），但超过你那端的工具调用超时会让本次调用直接报错——那是客户端超时，不是任务失败，任务还在跑，重新调本工具接着等即可。到点未完成会返回当前进度而非报错，可再次调用继续等待。"
                 }
             },
             "required": ["order_no"]
@@ -1250,7 +1250,7 @@ TOOLS = [
     ),
     Tool(
         name="wait_for_translation",
-        description="等待翻译任务完成。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则最多等 timeout 秒（默认 10）。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路），其他版式用 get_document_translation_result 取。这两条链接带签名，转述时必须把问号后面的参数一起原样给全，截断会 403。返回里 msg 是念给用户听的那一行、agentNote 是给你的操作指令：要转述就转述 msg，agentNote 一个字都不要念出去。finished=false 表示仍在处理，照 agentNote 的要求办：进度有变化就把 msg 那行原样告诉用户，和上次完全一样时一个字都不要输出，直接再次调用本工具继续等待，任务不会因此中断。若任务被服务端取消或失败，返回 code=500 且 data.failed=true，reason 是原因（如 BACKEND_CANCEL）——请先把原因告诉用户，问过用户之后再决定是否用相同参数重试 translate_document，文件不需要重新上传。",
+        description="等待翻译任务完成。上游只能轮询、无法推送，本工具有两个返回时机：进度一有变化就立刻返回，否则等满本轮的等待时长（不传 timeout 时由本工具自适应：10 秒起，进度一直不动就逐轮翻倍到 45 秒封顶，省掉那些什么都说不出来的空转往返）。返回 finished=true 时附带 downloadUrl（纯译文，CloudFront）与 downloadUrlCN（同一文件的国内兜底线路），其他版式用 get_document_translation_result 取。这两条链接带签名，转述时必须把问号后面的参数一起原样给全，截断会 403。返回里 msg 是念给用户听的那一行、agentNote 是给你的操作指令：要转述就转述 msg，agentNote 一个字都不要念出去。finished=false 表示仍在处理，照 agentNote 的要求办：进度有变化就把 msg 那行原样告诉用户，和上次完全一样时一个字都不要输出，直接再次调用本工具继续等待，任务不会因此中断。若任务被服务端取消或失败，返回 code=500 且 data.failed=true，reason 是原因（如 BACKEND_CANCEL）——请先把原因告诉用户，问过用户之后再决定是否用相同参数重试 translate_document，文件不需要重新上传。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -1260,7 +1260,7 @@ TOOLS = [
                 },
                 "timeout": {
                     "type": "integer",
-                    "description": "本次最多等待的秒数，默认 10。一轮只等这么点时间，是为了让进度尽快回到用户面前；进度没变化的那些轮次本工具会明确要求你不要输出任何文字，直接接着调，所以轮次多不等于屏幕上话多。不确定就别传。到点未完成会返回当前进度而非报错，可再次调用继续等待。"
+                    "description": "本次最多等待的秒数。**正常情况不要传**：不传时本工具自己掌握节奏——起步 10 秒，好让第一次进度尽快回到用户面前，之后进度每连着一轮没变就把等待翻一倍（10→20→40，上限 45 秒），进度一变又回到 10 秒。这么做是因为进度不动的那些轮次你什么都不该输出，可你每回来一次都是一整轮往返、上下文重发一遍，界面上还多一行空回合。传了本参数就按你给的秒数严格执行、不再自适应；传大值不会多打上游（轮询间隔是内部定的，与本参数无关），但超过你那端的工具调用超时会让本次调用直接报错——那是客户端超时，不是任务失败，任务还在跑，重新调本工具接着等即可。到点未完成会返回当前进度而非报错，可再次调用继续等待。"
                 }
             },
             "required": ["order_no"]
@@ -1418,7 +1418,7 @@ def build_tool_handlers(client: TranslationClient):
         ),
         "get_video_translation_status": lambda args: _video_status(client, args["order_no"]),
         "wait_for_video_translation": lambda args: client.wait_for_video_translation(
-            args["order_no"], args.get("timeout", 10), on_progress=_progress_reporter()
+            args["order_no"], args.get("timeout"), on_progress=_progress_reporter()
         ),
         "list_video_translations": lambda args: client.search_video_translate_page(
             args.get("page_num", 1),
@@ -1433,7 +1433,7 @@ def build_tool_handlers(client: TranslationClient):
         "get_video_rewrite_status": lambda args: client.get_video_rewrite_detail(args["order_no"]),
         "probe_elicitation": _probe_elicitation,
         "wait_for_translation": lambda args: client.wait_for_translation(
-            args["order_no"], args.get("timeout", 10), on_progress=_progress_reporter()
+            args["order_no"], args.get("timeout"), on_progress=_progress_reporter()
         ),
     }
 

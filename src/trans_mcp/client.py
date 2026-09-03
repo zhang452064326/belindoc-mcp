@@ -997,6 +997,19 @@ _RATE_LIMIT_BACKOFF = 15
 # 轮询起步间隔（之后各自递增退避）。提出来是为了测试能把等待压短。
 _DOC_POLL_SECONDS = 2
 _VIDEO_POLL_SECONDS = 5
+# 调用方没指定 timeout 时，本次调用自己等多久。进度不动的那些回合，调用方
+# 什么都说不出来（agentNote 明确要求闭嘴），可它每回来一次仍是一整轮对话：
+# 上下文重发一遍、界面上多一行空回合。所以没变一次就把下一轮翻一倍，
+# 10 → 20 → 40 → 45（上限），进度一变立刻回到 10 秒。
+# 上限压在 45 是因为不少客户端的工具调用超时就在 60 秒上下，等满 60 会被它
+# 判成调用失败——而任务其实好好的。
+_WAIT_TIMEOUT_BASE = 10
+_WAIT_TIMEOUT_MAX = 45
+
+
+def _auto_timeout(record: dict) -> int:
+    """按「进度连着几轮没动」决定本次等多久"""
+    return min(_WAIT_TIMEOUT_BASE * 2 ** record.get("silent", 0), _WAIT_TIMEOUT_MAX)
 
 
 async def _emit_progress(on_progress, percent: float, message: str) -> None:
@@ -1387,7 +1400,7 @@ class TranslationClient:
         _attach_upload_command(result)
         return result
     
-    async def wait_for_translation(self, order_no: str, timeout: int = 10, on_progress=None) -> dict:
+    async def wait_for_translation(self, order_no: str, timeout=None, on_progress=None) -> dict:
         """等待翻译任务完成，自动轮询状态
 
         上游只在轮询时给出进度，无法主动推送。两个返回时机：进度一变就立刻返回，
@@ -1398,10 +1411,12 @@ class TranslationClient:
         import asyncio
 
         record = _WAITS.setdefault(
-            order_no, {"totalElapsed": 0.0, "calls": 0, "lastKey": None}
+            order_no, {"totalElapsed": 0.0, "calls": 0, "lastKey": None, "silent": 0}
         )
         record["calls"] += 1
         _prune_waits()
+        if timeout is None:
+            timeout = _auto_timeout(record)
 
         start_time = asyncio.get_event_loop().time()
         last_logged = -1
@@ -1453,6 +1468,8 @@ class TranslationClient:
         def pending(elapsed: float, changed: bool) -> dict:
             """排队/翻译中时的返回体，带上跨调用的累计等待"""
             changed = changed or _wait_key(snapshot) != entry_key
+            # 连着几轮没动就让下一次调用等得更久，见 _auto_timeout
+            record["silent"] = 0 if changed else record.get("silent", 0) + 1
             record["totalElapsed"] += elapsed
             record["lastKey"] = _wait_key(snapshot)
             total = record["totalElapsed"]
@@ -2276,7 +2293,7 @@ class TranslationClient:
             {"videoTranslateRewriteOrderNo": order_no},
         )
 
-    async def wait_for_video_translation(self, order_no: str, timeout: int = 10, on_progress=None) -> dict:
+    async def wait_for_video_translation(self, order_no: str, timeout=None, on_progress=None) -> dict:
         """等待视频翻译任务完成
 
         和 wait_for_translation 同一套路子：进度一变就返回，否则最多等 timeout 秒，
@@ -2287,10 +2304,12 @@ class TranslationClient:
         import asyncio
 
         record = _WAITS.setdefault(
-            order_no, {"totalElapsed": 0.0, "calls": 0, "lastKey": None}
+            order_no, {"totalElapsed": 0.0, "calls": 0, "lastKey": None, "silent": 0}
         )
         record["calls"] += 1
         _prune_waits()
+        if timeout is None:
+            timeout = _auto_timeout(record)
 
         start_time = asyncio.get_event_loop().time()
         interval = _VIDEO_POLL_SECONDS  # 逐步放宽到 15 秒，文档建议 10-30 秒一次
@@ -2340,6 +2359,8 @@ class TranslationClient:
 
         def pending(elapsed: float, changed: bool) -> dict:
             changed = changed or _wait_key(snapshot) != entry_key
+            # 连着几轮没动就让下一次调用等得更久，见 _auto_timeout
+            record["silent"] = 0 if changed else record.get("silent", 0) + 1
             record["totalElapsed"] += elapsed
             record["lastKey"] = _wait_key(snapshot)
             total = record["totalElapsed"]
