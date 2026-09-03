@@ -53,5 +53,15 @@ def test_upload_note_states_the_deadline_and_triages_failures():
     assert "SignatureDoesNotMatch" in note and "别拿旧链接反复重试" in note
 
 
+def test_upload_note_separates_progress_from_result():
+    """实测：模型把命令尾巴的 -w 换成了 | tail -3，只看到进度条 #=#=# 就宣布
+    「上传完成」，然后同一个文件又传了一遍才拿到 HTTP 200。"""
+    note = _note(_url())
+    assert "-w 和 tr 也不能删" in note and "`| tail`" in note
+    assert "#=#=# 只是进度条，不是结果" in note
+    # 没验证过就去提交，扣的是真额度
+    assert "不要宣布上传完成" in note and "提交会真扣费" in note
+
+
 def test_expired_link_note_says_so():
     assert "已经过期" in _note(_url(issued_gmt=time.time() - 900))

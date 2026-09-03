@@ -717,12 +717,18 @@ def _attach_upload_command(result: dict, kind: str = "document") -> None:
         # 后台版原来是单独一个字段，等于把七百字符的签名 URL 又抄了一遍，而十次里
         # 有九次用不上。改成在说明里给出包法，要用的时候自己套一层就是了。
         item["uploadNote"] = (
-            "原样跑 uploadCommand，只替换文件路径，Content-Disposition 一个字符都不能改"
-            "（改了 S3 报 SignatureDoesNotMatch）。PDF 传完（看到 HTTP 200）之后先调 "
+            "原样跑 uploadCommand，只替换文件路径。Content-Disposition 一个字符都不能改"
+            "（改了 S3 报 SignatureDoesNotMatch）；结尾的 -w 和 tr 也不能删、不能把管道"
+            "改成 `| tail`（实测这么改之后屏幕上只剩进度条，结果那一行没了）——"
+            "-w 是整条命令里唯一能看到结果的地方。"
+            "PDF 传完（看到 HTTP 200）之后先调 "
             "check_pdf_ocr（把 objectKey 传进去）问一下是不是扫描件，再去提交翻译。"
             "超过 100MB 就把整条命令包起来放后台："
             f"`( <uploadCommand> > {log_path} 2>&1 ) &`，再 `tail -n 3 {log_path}` 看进度。"
-            f"出现「上传结果 HTTP 200」才算成功。成功后{_next_step_hint(kind)}。"
+            "--progress-bar 打出来的 #=#=# 只是进度条，不是结果：出现「上传结果 HTTP 200」"
+            "这一行才算成功。没有这一行就是没验证过，不要宣布上传完成，更不要接着提交"
+            "翻译——提交会真扣费，而这个 objectKey 底下可能根本没有文件。"
+            f"成功后{_next_step_hint(kind)}。"
             + _upload_expiry_note(url)
             # 实测：上传命令被客户端沙箱挡住（curl 无输出地挂住、nslookup 报
             # bind: Operation not permitted），模型据此断定「用户网络受限、DNS
@@ -800,6 +806,17 @@ def _build_account_snapshot(wallet_result, sub_result) -> dict:
         total_free = wallet.get("totalFreeTranslateQuota") or 0
         used_free = wallet.get("useFreeTranslateQuota") or 0
         free_left = max(0, total_free - used_free)
+        # 实测上游把 useFreeTranslateQuota 回成过负数（-4，正好等于上一单的实扣），
+        # 于是「剩余」算出来比总量还大，报出去就是「免费剩余 1204/1200」这种自相
+        # 矛盾的数——而它还会经 available 参与「够不够翻这一单」的判断。往小里钳，
+        # 并把这件事标出来：宁可少报，也不能让下游把一个说不通的数念给用户。
+        if free_left > total_free:
+            snapshot["quotaSuspect"] = (
+                f"上游回的已用免费额度是 {used_free}，据此算出的免费剩余 {free_left} "
+                f"比总量 {total_free} 还大，数据不自洽。这里已按总量取小，"
+                "免费额度这一项以平台页面为准。"
+            )
+            free_left = total_free
         purse = wallet.get("translateQuota") or 0
         snapshot["quota"] = {
             "freeLeft": free_left,

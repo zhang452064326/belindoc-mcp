@@ -737,16 +737,20 @@ async def _account_status(client, refresh: bool = False) -> dict:
         parts.append(f"单个视频最长 {limits['videoDurationMinutes']} 分钟")
     if limits.get("videoConcurrency"):
         parts.append(f"视频任务同时最多 {limits['videoConcurrency']} 个")
-    return {
-        "code": "200",
-        "msg": (
-            "；".join(parts)
-            + "。这些数字请原样转述，不要自己换算或者取整。额度是账户余额，"
-            "和某一单的实扣不是一回事。免费用户另有「每月累计视频时长」上限，"
-            "本接口看不到，超了要到提交时才会被拒。"
-        ),
-        "data": snapshot,
-    }
+    msg = (
+        "；".join(parts)
+        + "。这些数字请原样转述，不要自己换算或者取整。额度是账户余额，"
+        "和某一单的实扣不是一回事。免费用户另有「每月累计视频时长」上限，"
+        "本接口看不到，超了要到提交时才会被拒。"
+    )
+    # 上游偶尔会把免费额度回成对不上的数。原样转述的要求在前，这里必须把
+    # 「这一项不可信」一并说出去，否则模型会照着念一个自相矛盾的余额。
+    if snapshot.get("quotaSuspect"):
+        msg += "⚠️ 但免费额度这一项这次对不上：" + snapshot["quotaSuspect"] + (
+            "报余额时请把这句一并告诉用户，不要只报数字，也不要拿它去替用户判断"
+            "够不够翻下一单。"
+        )
+    return {"code": "200", "msg": msg, "data": snapshot}
 
 
 async def _video_status(client, order_no: str) -> dict:
