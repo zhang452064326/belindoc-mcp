@@ -300,6 +300,61 @@ def _menu_prompt(head: str, args, calc: dict, options: list, warning: str = "") 
     )
 
 
+# 订单号自带家族前缀：文档翻译是 TR、视频翻译是 VO。拿视频单号去调文档接口，
+# 上游只回一句 403「访问被拒绝」，模型会把它当权限问题——实测提交完视频紧接着
+# 调 wait_for_translation 就是这样卡住的，用户看到的是「遇到访问限制」。前缀对
+# 不上就在这里拦下，顺带把该调的工具名说出来。前缀不认识（改写单等）一律放行，
+# 交给上游判。
+_DOC_ORDER_TOOLS = {
+    "get_document_translation_status",
+    "get_document_translation_result",
+    "wait_for_translation",
+}
+_VIDEO_ORDER_TOOLS = {
+    "get_video_translation_status",
+    "wait_for_video_translation",
+    "cancel_video_translation",
+    "get_video_subtitles",
+    "rewrite_video_subtitles",
+}
+# 两条线上功能对得上的那几个，直接报出替代工具名
+_ORDER_TOOL_SWAP = {
+    "wait_for_translation": "wait_for_video_translation",
+    "get_document_translation_status": "get_video_translation_status",
+    "get_document_translation_result": "get_video_translation_status",
+    "wait_for_video_translation": "wait_for_translation",
+    "get_video_translation_status": "get_document_translation_status",
+}
+
+
+def _order_family_error(tool_name: str, args: dict) -> Optional[dict]:
+    """订单号的家族和工具对不上就别送上去换一句 403"""
+    order_no = args.get("order_no")
+    if not isinstance(order_no, str):
+        return None
+    prefix = order_no[:2].upper()
+    if tool_name in _DOC_ORDER_TOOLS and prefix == "VO":
+        got, want = "视频", "文档"
+    elif tool_name in _VIDEO_ORDER_TOOLS and prefix == "TR":
+        got, want = "文档", "视频"
+    else:
+        return None
+    instead = _ORDER_TOOL_SWAP.get(tool_name)
+    return {
+        "code": "400",
+        "data": None,
+        "orderFamily": "video" if prefix == "VO" else "document",
+        "msg": (
+            f"没有查询：{order_no} 是{got}翻译的订单号（{prefix} 开头），"
+            f"而 {tool_name} 只认{want}翻译的订单号。"
+            + (f"请改调 {instead}，参数照旧。" if instead
+               else f"这个工具没有{got}翻译的对应版本，请改用{got}翻译那一组工具。")
+            + "两条线的订单号不通用，硬送上去只会拿到一句 403「访问被拒绝」——"
+              "那不是权限问题，重试、换密钥、换单号都没有用。"
+        ),
+    }
+
+
 async def _reject(msg: str) -> dict:
     """参数校验不过就返回一条模型看得懂的错误，而不是抛异常——
     让它回去问用户，而不是把栈信息糊给用户看。"""
@@ -1382,12 +1437,16 @@ def build_tool_handlers(client: TranslationClient):
         ),
     }
 
-    def with_locale(fn):
+    def with_locale(name, fn):
         """每次调用先按 args.locale 定好语言，再进真正的处理器。
         contextvar 在 asyncio 里每个 Task 一份，HTTP 模式并发也不会串。"""
         async def run(args):
             token = i18n.use_locale(args.get("locale"))
             try:
+                # 文档单号 / 视频单号走错工具，上游只回 403，在这儿就拦下来
+                mismatch = _order_family_error(name, args)
+                if mismatch is not None:
+                    return mismatch
                 # 密钥层面的失败每个接口都可能回，统一在出口翻成可执行的一句话，
                 # 免得二十个处理器各自漏一遍
                 return annotate_key_error(await fn(args))
@@ -1395,7 +1454,7 @@ def build_tool_handlers(client: TranslationClient):
                 i18n.reset_locale(token)
         return run
 
-    return {name: with_locale(fn) for name, fn in handlers.items()}
+    return {name: with_locale(name, fn) for name, fn in handlers.items()}
 
 
 # 工具名的唯一真相是处理器表本身，别再手抄一份。client 只在 lambda 体里用到，

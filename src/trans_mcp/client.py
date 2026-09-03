@@ -313,6 +313,14 @@ def _annotate_video_status(record: dict) -> dict:
         record["stepText"] = video_step_text(record["step"])
     if record.get("stepStatus") is not None:
         record["stepStatusText"] = video_step_status_text(record["stepStatus"])
+    # videoDuration 是毫秒（文档 §3.4），字段名里看不出来。原样透出去，模型就当秒
+    # 念给用户听——实测 21134 毫秒的片子被报成「21134 秒，约 5.87 小时」。改成带
+    # 单位的字段名，另外补一行人话时长，让它照抄而不是自己换算。
+    if "videoDuration" in record:
+        duration_ms = record.pop("videoDuration")
+        record["videoDurationMs"] = duration_ms
+        if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+            record["videoDurationText"] = _format_duration(duration_ms / 1000)
     note = _output_note(record)
     rewrite = record.get("videoTranslateRewrite")
     if isinstance(rewrite, dict) and rewrite.get("status") == VIDEO_STATUS_DONE:
@@ -358,7 +366,8 @@ _VIDEO_RECORD_KEEP = (
     "outputNote",
     "sourceLanguage",
     "targetLanguage",
-    "videoDuration",
+    "videoDurationMs",
+    "videoDurationText",
     "freeTranslateQuota",
     "walletTranslateQuota",
     "progress",
@@ -2399,7 +2408,8 @@ class TranslationClient:
                         **({"rewriteOrderNo": rewrite["rewriteOrderNo"]} if rewrite else {}),
                         "videoFileName": data.get("videoFileName"),
                         "targetLanguage": data.get("targetLanguage"),
-                        "videoDurationMs": data.get("videoDuration"),
+                        "videoDurationMs": data.get("videoDurationMs"),
+                        "videoDurationText": data.get("videoDurationText"),
                         "totalWaited": _format_duration(total),
                         "usedFreeQuota": data.get("freeTranslateQuota"),
                         "usedWalletQuota": data.get("walletTranslateQuota"),
