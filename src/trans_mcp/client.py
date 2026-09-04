@@ -929,14 +929,6 @@ def video_duration_over_limit(duration_ms, snapshot: dict):
     return limit
 
 
-def _human_size(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024:
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
-
-
 def _format_duration(seconds: float) -> str:
     seconds = int(round(seconds))
     if seconds < 60:
