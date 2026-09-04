@@ -1950,11 +1950,39 @@ class TranslationClient:
         detected = await self._detect_ocr(file_list)
         pdfs = [f for f in file_list if is_pdf(f.get("fileName"))]
         scanned = [d["fileName"] for d in detected.values() if d["isOcr"] == 1]
-        undetected = [
-            f.get("fileName") for f in pdfs
-            if f.get("fileObjectKey") not in detected
-        ]
+        undetected_files = [f for f in pdfs if f.get("fileObjectKey") not in detected]
+        undetected = [f.get("fileName") for f in undetected_files]
         all_scanned = bool(detected) and not undetected and len(scanned) == len(detected)
+
+        # 检测还在跑就先别提交。判错的代价是实打实的：扫描件按普通 PDF 翻会出一片
+        # 空白，而 OCR 扣的是另一本额度，两边都得付钱。以前这里是 fail-open——
+        # 靠服务端的自动 OCR 兜底，可那个开关在账号上，/external 读不到，关着的
+        # 账号就真的翻出空白来了。
+        #
+        # 只在「还在跑」时挡：任务跑完但没测出结果（上游报错、字段是空）会被
+        # _OCR_TASKS 弹掉，那种情况照旧 fail-open 往下走，不会把调用方卡死在
+        # 一个永远不回来的接口上。调用方显式传了 is_ocr 就是自己做了主，也不挡。
+        if requested_ocr is None:
+            detecting = [
+                f.get("fileName") for f in undetected_files
+                if f.get("fileObjectKey") in _OCR_TASKS
+            ]
+            if detecting:
+                names = "、".join(n for n in detecting if n)
+                return {
+                    "code": "202",
+                    "data": {"submitted": False, "charged": False, "detecting": detecting},
+                    "msg": (
+                        f"没有提交、没有扣费。这些 PDF 还在判定是不是扫描件：{names}。"
+                        "服务端要把整个文件下下来分析，大文件几十秒到几分钟都有可能。"
+                        "这里先不提交是因为判错两边都要付代价：扫描件按普通 PDF 翻会出"
+                        "一片空白，而 OCR 扣的是另一本额度。"
+                        "等十几秒原样再调一次本工具即可（想看进展就调 check_pdf_ocr，"
+                        "它会告诉你测完没有）——这期间不用重新上传，fileObjectKey 一直有效。"
+                        "如果确实等不了，或者检测一直不回来，就显式传 is_ocr 绕过这一步："
+                        "0=按普通 PDF 翻，1=强制整批走 OCR。"
+                    ),
+                }
 
         # 批级 isOcr 是「强制整批走 OCR」的开关：服务端 TranslateFileHistoryServiceImpl
         # 里 ocrSwatch==1 时每个 PDF 都按 OCR 记账，压根不看逐文件的检测结果。所以

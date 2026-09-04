@@ -1009,7 +1009,7 @@ TOOLS = [
     ),
     Tool(
         name="translate_document",
-        description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。返回中的 orders[].translateOrderNo 即订单号，直接用它调 wait_for_translation，无需再查列表。图片（png/jpg/jpeg）也走这个工具——服务端把它们当 IMAGE 类型，按 1 页计费，且一律走 OCR（扣的是 OCR 额度），不需要另外的图片翻译接口。支持的格式：PDF / DOCX / PPTX / XLSX / TXT / EPUB / 图片。提交前本工具会对 file_list 里的 PDF 自动判定是不是扫描件（只有 PDF 有这个概念），据此填 OCR 开关，结果在返回的 msg 和 ocrDetection 里——请把「走没走 OCR」原样告诉用户，那关系到扣哪一本额度。若返回非 200（如 600 系统繁忙），说明是翻译服务侧的问题而非上传问题：用相同参数重试本工具即可，不要重新上传文件。",
+        description="提交文档翻译任务。请先调用 get_model_list 获取可用模型，调用 get_supported_languages 获取支持的语言列表，然后让用户选择模型和目标语言。返回中的 orders[].translateOrderNo 即订单号，直接用它调 wait_for_translation，无需再查列表。图片（png/jpg/jpeg）也走这个工具——服务端把它们当 IMAGE 类型，按 1 页计费，且一律走 OCR（扣的是 OCR 额度），不需要另外的图片翻译接口。支持的格式：PDF / DOCX / PPTX / XLSX / TXT / EPUB / 图片。提交前本工具会对 file_list 里的 PDF 自动判定是不是扫描件（只有 PDF 有这个概念），据此填 OCR 开关，结果在返回的 msg 和 ocrDetection 里——请把「走没走 OCR」原样告诉用户，那关系到扣哪一本额度。**若返回 code=202，表示判定还没出来，本次没有提交、没有扣费**（data.submitted / data.charged 都是 false，data.detecting 是还在测的文件）：等十几秒用完全相同的参数再调一次本工具即可，不要重新上传文件、也不要改参数。这一步挡着是因为判错两边都要付代价：扫描件按普通 PDF 翻会出一片空白，OCR 又扣另一本额度。确实等不及、或者反复 202 一直不出结果，就显式传 is_ocr（0=按普通 PDF 翻，1=强制整批走 OCR）绕过它。若返回非 200（如 600 系统繁忙），说明是翻译服务侧的问题而非上传问题：用相同参数重试本工具即可，不要重新上传文件。",
         inputSchema={
             "type": "object",
             "properties": {

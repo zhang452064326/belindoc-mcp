@@ -234,13 +234,14 @@ async def test_check_pdf_ocr_answers_from_the_background_task(client):
 
 
 @pytest.mark.asyncio
-async def test_submit_does_not_hang_on_a_slow_detection(client, monkeypatch):
-    """检测慢不能把提交拖到调用方超时
+async def test_slow_detection_holds_the_submit_instead_of_hanging(client, monkeypatch):
+    """检测慢：不能拖住调用方，也不能糊里糊涂提交
 
-    这一步夹在 translate_document 里面。等满了调用方就超时，而它多半会原样重试
-    ——上游对文档提交不去重，于是同一份文件出两单、扣两次费（2026-09-04 实测：
-    一份大 PDF 出了 TR...165354 和 TR...165445 两单，各扣 428）。等不到就当没
-    测过往下走，msg 里已经会说「没能判断是不是扫描件」。
+    拖住的后果实测过——提交挂满 60 秒，调用方超时重试，上游对文档提交不去重，
+    同一份大 PDF 出了两单各扣 428。所以这一步必须很快返回。
+
+    但也不能就这么按普通 PDF 提交：扫描件那样翻会出一片空白，而 OCR 扣的是
+    另一本额度。回 202、明说没提交没扣费，让调用方过几秒再来。
     """
     import asyncio
     import time
@@ -266,9 +267,52 @@ async def test_submit_does_not_hang_on_a_slow_detection(client, monkeypatch):
     elapsed = time.monotonic() - t0
 
     assert elapsed < 5, f"提交被检测拖了 {elapsed:.1f} 秒"
+    assert result["code"] == "202"
+    assert result["data"] == {"submitted": False, "charged": False, "detecting": ["big.pdf"]}
+    assert "没有提交、没有扣费" in result["msg"]
+    assert "不用重新上传" in result["msg"]
+    # 一个字都没提交上去
+    assert not [u for u in calls if u.endswith("batchSubmitTranslateTask")]
+    client_mod._OCR_TASKS["k/big.pdf"].cancel()
+
+
+@pytest.mark.asyncio
+async def test_explicit_is_ocr_skips_the_hold(client, monkeypatch):
+    """调用方自己做了主就别拦——也是检测一直不回来时的出口"""
+    import asyncio
+
+    async def slow_post(url, json=None, **kwargs):
+        if url.endswith("/isOcr"):
+            await asyncio.sleep(30)
+            return FakeResponse({"code": "200", "data": {"isOcr": 1, "isDoubleDeck": 0}})
+        if url.endswith("searchTranslateFilePage"):
+            return FakeResponse({"code": "200", "data": {"records": []}})
+        return FakeResponse({"code": "200", "data": {}})
+
+    client.client.post = slow_post
+    monkeypatch.setattr(client_mod, "_SUBMIT_OCR_WAIT", 0.2)
+
+    result = await client.batch_submit_translate_task(
+        [{"fileName": "big.pdf", "fileObjectKey": "k/big.pdf"}], "en", "zh-CN", is_ocr=1
+    )
+    assert result["code"] == "200"
+    client_mod._OCR_TASKS["k/big.pdf"].cancel()
+
+
+@pytest.mark.asyncio
+async def test_detection_that_gave_up_does_not_loop_the_caller(client):
+    """检测测不出来（上游报错）就照旧往下走，别把调用方卡在一个永远不回的接口上
+
+    202 只在「还在跑」时给。跑完没结果的任务会被 _OCR_TASKS 弹掉，那种情况
+    fail-open，msg 里照旧提示「没能判断是不是扫描件」。
+    """
+    calls = make_client(client, None)     # isOcr 直接抛错
+    result = await client.batch_submit_translate_task(
+        [{"fileName": "x.pdf", "fileObjectKey": "k/x.pdf"}], "en", "zh-CN"
+    )
     assert result["code"] == "200"
     assert "没能判断是不是扫描件" in result["msg"]
-    assert any(url.endswith("batchSubmitTranslateTask") for url in calls)
+    assert [u for u, _ in calls if u.endswith("batchSubmitTranslateTask")]
 
 
 @pytest.mark.asyncio
