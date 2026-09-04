@@ -1829,6 +1829,7 @@ class TranslationClient:
         target_language: str,
         model: str = "Gemini-2.5-Flash",
         is_ocr=None,
+        terminology_collection_id: Optional[str] = None,
     ) -> dict:
         """批量提交文档翻译任务
 
@@ -1912,6 +1913,11 @@ class TranslationClient:
             "isMath": 0,
             "isFlow": 0,
         }
+        # 术语表：上游 BatchSubmitTranslateRequest 早就有这个字段，提交时随记录落库，
+        # 跑任务时把词条拉出来拼成 {原词: 译词} 交给引擎。空值等同于「不用术语表」，
+        # 所以只在真有 id 时才带——带个空串只是白占一个键。
+        if terminology_collection_id and terminology_collection_id.strip():
+            payload["terminologyCollectionId"] = terminology_collection_id.strip()
         
         result = {}
         for attempt in range(4):

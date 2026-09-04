@@ -1027,6 +1027,10 @@ TOOLS = [
                 "is_ocr": {
                     "type": "integer",
                     "description": "是否启用 OCR，0=否，1=是。**不要自己判断，正常情况下不要传**：提交前服务端会对每个 PDF 调分类接口，按真实结果逐个标记，比看文件名靠谱得多。这个参数的真实含义是「强制整批走 OCR」——服务端见到 1 就把批次里每个 PDF 都按 OCR 记账，不再看检测结果，文本版那几份等于白扣 OCR 额度。所以只有用户明确要求强制 OCR 时才传 1；传了不会被改掉，但返回里会提醒你这和检测结果不符。注意 OCR 扣的是 OCR 额度，和普通翻译不是同一本账。"
+                },
+                "terminology_collection_id": {
+                    "type": "string",
+                    "description": "术语表 ID（选填）。带上之后，这一批文件里凡是命中术语表的词都按表里指定的译法翻。**不要自己编，也不要猜**：这个 ID 只能由用户提供——他登录 belindoc.com 网页端、在术语库页面拿到。本服务没有列出术语表的工具，因为上游管理术语表的那几个接口认的是网页登录态而不是 API Key。用户没主动提术语表就别传这个参数，更不要为了它去打断用户。另外上游收到这个 ID 既不校验归属也不校验存在：写错或写了个不存在的，提交照样成功、翻译照常跑，只是术语表静默不生效，事后没有任何地方看得出来——所以只转述用户给的原值，一个字符都不要改。"
                 }
             },
             "required": ["file_list", "source_language", "target_language", "model"]
@@ -1406,6 +1410,7 @@ def build_tool_handlers(client: TranslationClient):
             args.get("model", "Gemini-2.5-Flash"),
             # 不填默认值：None 表示「调用方没主张」，交给服务端检测
             args.get("is_ocr"),
+            args.get("terminology_collection_id"),
         ),
         "get_account_status": lambda args: _account_status(client, args.get("refresh", False)),
         "check_pdf_ocr": lambda args: _check_pdf_ocr(
