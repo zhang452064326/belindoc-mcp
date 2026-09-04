@@ -121,5 +121,5 @@ async def test_account_status_says_all_three_ledgers():
     result = await _account_status(Fake())
     assert "OCR 额度 1400" in result["msg"]
     assert "高级模型额度 125" in result["msg"]
-    # 三本账不能相加，这句得说出来
-    assert "不要把三本账加在一起" in result["msg"]
+    # OCR 那组不能当成另一份余额加上去，这句得说出来
+    assert "不是另一份能加上去的余额" in result["msg"]
