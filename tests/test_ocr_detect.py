@@ -269,3 +269,38 @@ async def test_submit_does_not_hang_on_a_slow_detection(client, monkeypatch):
     assert result["code"] == "200"
     assert "没能判断是不是扫描件" in result["msg"]
     assert any(url.endswith("batchSubmitTranslateTask") for url in calls)
+
+
+@pytest.mark.asyncio
+async def test_caller_wait_is_not_the_upstream_budget(client, monkeypatch):
+    """调用方等 15 秒，不等于只给 isOcr 15 秒
+
+    这两个数以前是同一个：提交时传的 15 秒被一路带成了 isOcr 的 HTTP 超时。
+    而 isOcr 在大文件上常跑 > 30 秒（网页端为此把 dev 代理的 proxyTimeout
+    提到 120 秒），等于大文件永远测不出来——扫描件按普通 PDF 提交，翻出一片
+    空白还扣错账。现在上游那趟一律拿满 _OCR_UPSTREAM_TIMEOUT。
+    """
+    import asyncio
+
+    seen = []
+
+    async def fake_post(path, payload, timeout=None):
+        seen.append(timeout)
+        await asyncio.sleep(0.3)          # 比调用方肯等的久
+        return {"code": "200", "data": {"isOcr": 1, "isDoubleDeck": 0}}
+
+    client._post = fake_post
+
+    # 调用方只肯等 0.05 秒：拿不到结果，但不该把那趟掐掉
+    assert await client.detect_ocr_for_key("k/big.pdf", "big.pdf", timeout=0.05) is None
+    assert seen == [client_mod._OCR_UPSTREAM_TIMEOUT], f"isOcr 拿到的预算是 {seen}"
+    assert client_mod._OCR_UPSTREAM_TIMEOUT >= 120
+
+    # 放手之后它照样跑完，结果落进缓存，下一次直接取
+    for _ in range(50):
+        if client_mod.ocr_of("k/big.pdf"):
+            break
+        await asyncio.sleep(0.02)
+    assert client_mod.ocr_of("k/big.pdf")["isOcr"] == 1
+    assert await client.detect_ocr_for_key("k/big.pdf", "big.pdf", timeout=0.05) is not None
+    assert len(seen) == 1, "缓存命中还去打了一趟上游"

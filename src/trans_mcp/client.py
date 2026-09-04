@@ -697,15 +697,19 @@ def ocr_of(object_key: str):
 # （UploadFileSection 的 axios.put.then 里），这边照做：上传返回不等它，等到
 # 提交翻译时再来收结果，那会儿多半早就回来了。
 _OCR_TASKS: dict = {}
-# 提交时最多等检测多久。见 _detect_ocr 的说明：这一步在提交里面，等满就等于
-# 让调用方超时重试，而重试会真的多出一单。
-#
-# 别把它往大了调。isOcr 在大文件上常跑 > 30 秒（网页端为此把 Next dev 代理的
-# proxyTimeout 从默认 30 秒提到 120 秒，见 free-pdf-translate next.config.js），
-# 但那 120 秒的预算属于上传时发出去的后台任务（start_ocr_detection 传的就是
-# 120），不属于提交这一趟。提交这趟只是「顺手看看后台测完没有」，等不到就
-# fail-open——服务端的自动 OCR 会在受理时自己再判一次（实测：一单以 is_ocr=0
-# 提交，落库仍是 isOcr=1）。
+
+# isOcr 那一趟自己的预算。上游要把整个 PDF 下下来交给分类器，大文件常跑 > 30 秒
+# （网页端为此把 Next dev 代理的 proxyTimeout 从默认 30 秒提到 120 秒，见
+# free-pdf-translate next.config.js）。给到 5 分钟：这趟一律在后台跑，没有人挂着
+# 等它，跑多久都不占任何一次工具调用的时间；给短了则大文件永远测不出来，而测不
+# 出来的代价是扫描件按普通 PDF 提交、翻出一片空白还扣错账。
+_OCR_UPSTREAM_TIMEOUT = 300.0
+
+# 提交时最多等检测多久——这是「调用方愿意等多久」，和上面那个是两码事。
+# 这一步夹在 translate_document 里面，等满就等于让调用方超时重试，而重试会真的
+# 多出一单（见 _detect_ocr）。等不到就 fail-open：后台那趟还在跑，结果会落进
+# 缓存；服务端的自动 OCR 也会在受理时自己再判一次（实测：一单以 is_ocr=0 提交，
+# 落库仍是 isOcr=1）。
 _SUBMIT_OCR_WAIT = 15.0
 
 
@@ -1780,7 +1784,9 @@ class TranslationClient:
                 print(f"查询出错: {e}，{interval}秒后重试...", file=sys.stderr, flush=True)
                 await asyncio.sleep(interval)
 
-    async def check_file_is_ocr(self, file_object_key: str, storage_type=None, timeout: float = 60.0) -> dict:
+    async def check_file_is_ocr(
+        self, file_object_key: str, storage_type=None, timeout: float = _OCR_UPSTREAM_TIMEOUT
+    ) -> dict:
         """这份文件是不是扫描件（只对 PDF 有意义）
 
         上游拿 objectKey 现签一个 30 分钟的地址交给分类器，回 isOcr / isDoubleDeck。
@@ -1793,9 +1799,9 @@ class TranslationClient:
                 "fileObjectKey": file_object_key,
                 "storageType": storage_type if storage_type is not None else storage_type_of(file_object_key),
             },
-            # 上游要把整个 PDF 下下来交给分类器。网页端给这一步留了 120 秒，
-            # 但 MCP 是一问一答，挂两分钟没法交代，所以只给一个够用的上限，
-            # 测不出来就当没测过——这一步失败不影响翻译。
+            # 上游要把整个 PDF 下下来交给分类器，大文件几分钟都可能。这趟是在
+            # 后台跑的，没有人挂着等，所以给足预算；工具调用那边各自有自己的
+            # 等待上限，等不到就先走，不会被这个数拖住。
             timeout=timeout,
         )
 
@@ -1811,7 +1817,7 @@ class TranslationClient:
         # 一进 _OCR_TASKS，detect_ocr_for_key 开头那句「已经有人在测了，等它」
         # 等到的就是任务自己，死等到超时，上游一趟都没打出去。
         task = asyncio.ensure_future(
-            self._run_ocr_detection(object_key, file_name, timeout=120.0)
+            self._run_ocr_detection(object_key, file_name)
         )
         _OCR_TASKS[object_key] = task
 
@@ -1824,32 +1830,32 @@ class TranslationClient:
         task.add_done_callback(_done)
 
     async def detect_ocr_for_key(
-        self, object_key: str, file_name: str = "", timeout: float = 60.0
+        self, object_key: str, file_name: str = "", timeout: float = _SUBMIT_OCR_WAIT
     ) -> Optional[dict]:
-        """检测一个已经传上去的 PDF，并把结果记下来。测不出来返回 None。"""
+        """检测一个已经传上去的 PDF，并把结果记下来。等不到返回 None。
+
+        timeout 是**调用方愿意等多久**，不是 isOcr 那一趟的预算。两者以前是同一个
+        数，于是提交时那 15 秒直接变成了 isOcr 的 HTTP 超时——而大文件常跑 > 30 秒，
+        等于大文件永远测不出来。现在上游那趟一律交给后台任务、拿满
+        _OCR_UPSTREAM_TIMEOUT；这里等不及就放手，它照样跑完并把结果写进缓存，
+        下一次（提交时、或者调用方再问一次 check_pdf_ocr）直接取。
+        """
         cached = ocr_of(object_key)
         if cached:
             return cached
+        self.start_ocr_detection(object_key, file_name)
         running = _OCR_TASKS.get(object_key)
-        if running is not None and running is not asyncio.current_task():
-            # 上传那会儿已经发出去了，等它就好，别再打一趟。等不及也不取消——
-            # 它跑完照样会把结果写进缓存，下一次就能直接取。
-            # 排除自己：后台任务跑的就是这段路，等自己等不出结果。
-            try:
-                return await asyncio.wait_for(asyncio.shield(running), timeout)
-            except Exception:
-                return None
-        # 硬性挂钟上限：光靠 httpx 的 timeout 不够稳（重试、慢响应体都能拖过头），
-        # 而这个函数的调用方之一是提交流程，拖过头就是让调用方超时重试。
+        if running is None:
+            # 刚好在这中间跑完了
+            return ocr_of(object_key)
+        # shield：等不及是我们放手，不是把那趟取消掉
         try:
-            return await asyncio.wait_for(
-                self._run_ocr_detection(object_key, file_name, timeout), timeout
-            )
+            return await asyncio.wait_for(asyncio.shield(running), timeout)
         except Exception:
             return None
 
     async def _run_ocr_detection(
-        self, object_key: str, file_name: str = "", timeout: float = 60.0
+        self, object_key: str, file_name: str = "", timeout: float = _OCR_UPSTREAM_TIMEOUT
     ) -> Optional[dict]:
         """真去打上游那一趟并把结果记下来。不看 _OCR_TASKS——后台任务自己就在
         里面，看了就是等自己。"""
@@ -1904,10 +1910,8 @@ class TranslationClient:
                 pending.append(item)
         if not pending:
             return detected
-        # 先确保后台在测：这样即便下面等不及把它放掉，那一趟也还在跑，结果会落进
-        # 缓存，调用方稍后重试就能直接取到，不用再等一遍。
-        for item in pending:
-            self.start_ocr_detection(item["fileObjectKey"], item.get("fileName", ""))
+        # detect_ocr_for_key 自己会确保后台在测：等不及把它放掉，那一趟也还在跑，
+        # 结果会落进缓存，调用方稍后重试直接取到，不用再等一遍。
         results = await asyncio.gather(
             *[
                 self.detect_ocr_for_key(
