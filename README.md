@@ -61,6 +61,17 @@ HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器�
 配置文件位置：Claude Desktop 是 `~/Library/Application Support/Claude/claude_desktop_config.json`，
 Codex 是 `~/.codex/config.json`。
 
+`command` 必须是绝对路径——上面「安装」那步 `pip install -e .` 之后，venv 里会生成
+`trans-mcp` 这个可执行文件，填它的完整路径（形如 `/path/to/trans-mcp/.venv/bin/trans-mcp`）。
+客户端不走登录 shell，`PATH` 里通常没有这个 venv，写裸命令名会起不来。
+
+不想把 key 写进客户端配置的话，也可以放进项目根目录的 `.env`，启动时自己加载：
+
+```bash
+cp .env.example .env   # 填入 API Key
+source .env && trans-mcp
+```
+
 ### HTTP 远程
 
 ```json
@@ -84,6 +95,12 @@ Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.
 url = "http://YOUR_SERVER_IP:8080/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
+
+### 接上之后
+
+调一次 `get_account_status` 验证密钥通不通，顺便看余额。想知道这个客户端支不支持服务端
+弹窗确认（关系到视频提交走一步还是两步），调一次 `probe_elicitation`——它不翻译、不提交
+任务、不扣额度。
 
 ## 典型流程
 
