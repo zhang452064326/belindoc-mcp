@@ -270,7 +270,8 @@ async def test_slow_detection_holds_the_submit_instead_of_hanging(client, monkey
     assert result["code"] == "202"
     assert result["data"] == {"submitted": False, "charged": False, "detecting": ["big.pdf"]}
     assert "没有提交、没有扣费" in result["msg"]
-    assert "不用重新上传" in result["msg"]
+    assert "完全相同的参数再调一次 translate_document" in result["msg"]
+    assert "不要重新上传文件" in result["msg"]
     # 一个字都没提交上去
     assert not [u for u in calls if u.endswith("batchSubmitTranslateTask")]
     client_mod._OCR_TASKS["k/big.pdf"].cancel()

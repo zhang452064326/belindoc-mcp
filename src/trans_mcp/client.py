@@ -1977,8 +1977,10 @@ class TranslationClient:
                         "服务端要把整个文件下下来分析，大文件几十秒到几分钟都有可能。"
                         "这里先不提交是因为判错两边都要付代价：扫描件按普通 PDF 翻会出"
                         "一片空白，而 OCR 扣的是另一本额度。"
-                        "等十几秒原样再调一次本工具即可（想看进展就调 check_pdf_ocr，"
-                        "它会告诉你测完没有）——这期间不用重新上传，fileObjectKey 一直有效。"
+                        "等十几秒，用和这次完全相同的参数再调一次 translate_document："
+                        "file_list、source_language、target_language、model 一个都不要改，"
+                        "也不要重新上传文件——fileObjectKey 一直有效。想先看进展就调 "
+                        "check_pdf_ocr，它会告诉你测完没有。"
                         "如果确实等不了，或者检测一直不回来，就显式传 is_ocr 绕过这一步："
                         "0=按普通 PDF 翻，1=强制整批走 OCR。"
                     ),
