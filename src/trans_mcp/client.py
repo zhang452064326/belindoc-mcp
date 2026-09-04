@@ -819,6 +819,31 @@ def _epoch_day(value) -> str:
         return ""
 
 
+_OCR_WALLET_KEYS = (
+    "ocrTranslateQuota", "totalFreeOcrTranslateQuota", "useFreeOcrTranslateQuota",
+)
+
+
+def _free_left(total, used):
+    """免费额度剩多少：上游给的是「用了多少 / 一共多少」，得自己减
+
+    实测上游把已用量回成过负数（-4，正好等于上一单的实扣），于是「剩余」算出来
+    比总量还大，报出去就是「免费剩余 1204/1200」这种自相矛盾的数——而它还会经
+    available 参与「够不够翻这一单」的判断。往小里钳，并把这件事标出来：宁可
+    少报，也不能让下游把一个说不通的数念给用户。
+    """
+    total = total or 0
+    used = used or 0
+    left = max(0, total - used)
+    if left > total:
+        return total, total, (
+            f"上游回的已用免费额度是 {used}，据此算出的免费剩余 {left} "
+            f"比总量 {total} 还大，数据不自洽。这里已按总量取小，"
+            "免费额度这一项以平台页面为准。"
+        )
+    return left, total, ""
+
+
 def _build_account_snapshot(wallet_result, sub_result) -> dict:
     """把钱包和订阅两份响应压成一屏能读完的样子
 
@@ -840,29 +865,41 @@ def _build_account_snapshot(wallet_result, sub_result) -> dict:
 
     snapshot: dict = {"ok": True}
     if wallet is not None:
-        total_free = wallet.get("totalFreeTranslateQuota") or 0
-        used_free = wallet.get("useFreeTranslateQuota") or 0
-        free_left = max(0, total_free - used_free)
-        # 实测上游把 useFreeTranslateQuota 回成过负数（-4，正好等于上一单的实扣），
-        # 于是「剩余」算出来比总量还大，报出去就是「免费剩余 1204/1200」这种自相
-        # 矛盾的数——而它还会经 available 参与「够不够翻这一单」的判断。往小里钳，
-        # 并把这件事标出来：宁可少报，也不能让下游把一个说不通的数念给用户。
-        if free_left > total_free:
-            snapshot["quotaSuspect"] = (
-                f"上游回的已用免费额度是 {used_free}，据此算出的免费剩余 {free_left} "
-                f"比总量 {total_free} 还大，数据不自洽。这里已按总量取小，"
-                "免费额度这一项以平台页面为准。"
-            )
-            free_left = total_free
+        free_left, total_free, suspect = _free_left(
+            wallet.get("totalFreeTranslateQuota"), wallet.get("useFreeTranslateQuota"),
+        )
+        if suspect:
+            snapshot["quotaSuspect"] = suspect
         purse = wallet.get("translateQuota") or 0
+
+        # OCR 是另一本账：扫描件和图片扣的是它，不是上面那本。上游连免费额度也
+        # 单独发一份（totalFreeOcrTranslateQuota/useFreeOcrTranslateQuota），所以
+        # 这边照普通额度的算法再算一遍——原先只把 ocrTranslateQuota 原样带出来，
+        # 那只是钱包那半截，免费那半截整个丢了。
+        ocr_free_left, ocr_free_total, ocr_suspect = _free_left(
+            wallet.get("totalFreeOcrTranslateQuota"), wallet.get("useFreeOcrTranslateQuota"),
+        )
+        if ocr_suspect and "quotaSuspect" not in snapshot:
+            snapshot["quotaSuspect"] = "OCR " + ocr_suspect
+        ocr_purse = wallet.get("ocrTranslateQuota") or 0
+
         snapshot["quota"] = {
             "freeLeft": free_left,
             "freeTotal": total_free,
             "wallet": purse,
             "available": free_left + purse,
+            # 高级模型（getModelList 里 coefficient>1 的那几个）另有一本
             "advanced": wallet.get("advancedTranslateQuota"),
-            "ocr": wallet.get("ocrTranslateQuota"),
         }
+        # 一个 OCR 字段都没回（老版本服务端）就整本不报——报成 0 会被念成
+        # 「OCR 额度用完了」，那是编出来的。
+        if any(k in wallet for k in _OCR_WALLET_KEYS):
+            snapshot["quota"].update({
+                "ocrFreeLeft": ocr_free_left,
+                "ocrFreeTotal": ocr_free_total,
+                "ocrWallet": ocr_purse,
+                "ocrAvailable": ocr_free_left + ocr_purse,
+            })
     if sub is not None:
         snapshot["vip"] = {
             "name": sub.get("vipName"),

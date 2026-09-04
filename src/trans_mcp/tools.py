@@ -783,6 +783,16 @@ async def _account_status(client, refresh: bool = False) -> dict:
             f"（免费剩余 {quota.get('freeLeft')}/{quota.get('freeTotal')}，"
             f"钱包 {quota.get('wallet')}）"
         )
+        # OCR 是另一本账，扫描件和图片扣的是它。不报出来的话，用户问「OCR 还剩
+        # 多少」就只能拿上面那个总额顶，而那是另一本。
+        if quota.get("ocrAvailable") is not None:
+            parts.append(
+                f"OCR 额度 {quota.get('ocrAvailable')}"
+                f"（免费剩余 {quota.get('ocrFreeLeft')}/{quota.get('ocrFreeTotal')}，"
+                f"钱包 {quota.get('ocrWallet')}）"
+            )
+        if quota.get("advanced") is not None:
+            parts.append(f"高级模型额度 {quota.get('advanced')}")
     if vip.get("name"):
         parts.append(
             f"会员 {vip['name']}"
@@ -794,9 +804,10 @@ async def _account_status(client, refresh: bool = False) -> dict:
         parts.append(f"视频任务同时最多 {limits['videoConcurrency']} 个")
     msg = (
         "；".join(parts)
-        + "。这些数字请原样转述，不要自己换算或者取整。额度是账户余额，"
-        "和某一单的实扣不是一回事。免费用户另有「每月累计视频时长」上限，"
-        "本接口看不到，超了要到提交时才会被拒。"
+        + "。这些数字请原样转述，不要自己换算或者取整，也不要把三本账加在一起——"
+        "普通翻译、OCR（扫描件和图片）、高级模型是分开的三本，扣哪本取决于这一单"
+        "怎么翻。额度是账户余额，和某一单的实扣不是一回事。免费用户另有"
+        "「每月累计视频时长」上限，本接口看不到，超了要到提交时才会被拒。"
     )
     # 上游偶尔会把免费额度回成对不上的数。原样转述的要求在前，这里必须把
     # 「这一项不可信」一并说出去，否则模型会照着念一个自相矛盾的余额。
@@ -951,7 +962,7 @@ TOOLS = [
     ),
     Tool(
         name="get_account_status",
-        description="查询账户的可用额度、会员档位和各项限额。要报余额、要判断「够不够翻这一单」时用它——额度数字必须来自本工具，不要从之前某一单的实扣去推算，两者不是一回事（那是本次消耗，不是余额）。返回里 quota.available 是可用总额（免费剩余 + 钱包），limits 是当前会员档的硬限制：videoDurationMinutes 单个视频最长多少分钟、videoConcurrency 视频任务能同时跑几个、uploadFileSizeMB 单文件多大。这些限制服务端会真的按它拒绝提交，所以准备翻一个长视频之前先看一眼。注意免费用户另有「每月累计视频时长」上限，本接口看不到，只有提交时才会撞上。查不到时返回 code=500，请如实告诉用户查不到，不要拿估算值顶上。",
+        description="查询账户的可用额度、会员档位和各项限额。要报余额、要判断「够不够翻这一单」时用它——额度数字必须来自本工具，不要从之前某一单的实扣去推算，两者不是一回事（那是本次消耗，不是余额）。返回里 quota 是三本分开的账：available 是普通翻译的可用总额（免费剩余 + 钱包），ocrAvailable 是 OCR 额度（扫描件和图片扣这本），advanced 是高级模型额度（get_model_list 里 coefficient>1 的那几个用它）。三本不要相加，也不要拿其中一本去答另一本的余额。limits 是当前会员档的硬限制：videoDurationMinutes 单个视频最长多少分钟、videoConcurrency 视频任务能同时跑几个、uploadFileSizeMB 单文件多大。这些限制服务端会真的按它拒绝提交，所以准备翻一个长视频之前先看一眼。注意免费用户另有「每月累计视频时长」上限，本接口看不到，只有提交时才会撞上。查不到时返回 code=500，请如实告诉用户查不到，不要拿估算值顶上。",
         inputSchema={
             "type": "object",
             "properties": {
