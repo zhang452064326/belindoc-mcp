@@ -89,8 +89,10 @@ async def test_account_status_reports_real_numbers():
     c._post = fake_post
     result = await tools._account_status(c)
     assert result["code"] == "200"
-    assert result["data"]["quota"]["available"] == 4
-    assert "免费剩余 4/10" in result["msg"]
+    assert result["data"]["quota"]["wallet"] == 0
+    assert result["data"]["quota"]["freeUsed"] == 6
+    assert "可用额度 0" in result["msg"]
+    assert "今日免费已用 6/10" in result["msg"]
 
 
 @pytest.mark.asyncio

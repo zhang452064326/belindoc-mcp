@@ -86,8 +86,10 @@ async def test_account_snapshot_merges_wallet_and_subscription(client):
     client._post = fake_post
     snapshot = await client.account_snapshot()
     assert snapshot["ok"] is True
-    assert snapshot["quota"]["freeLeft"] == 4          # 10 - 6
-    assert snapshot["quota"]["available"] == 124       # 免费剩余 + 钱包
+    # 余额就是 translateQuota 本身：它已经含了免费那部分的消耗，不能再加
+    assert snapshot["quota"]["wallet"] == 120
+    assert snapshot["quota"]["freeUsed"] == 6
+    assert snapshot["quota"]["freeTotal"] == 10
     assert snapshot["limits"]["videoDurationMinutes"] == 60
 
 

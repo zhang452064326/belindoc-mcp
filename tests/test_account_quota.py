@@ -1,8 +1,14 @@
-"""免费额度对不上时不能原样端出去
+"""余额只有一本，别自己拼一个出来
 
-实测一次：上游把 useFreeTranslateQuota 回成了 -4（正好等于上一单的实扣），
-于是「免费剩余」算出来 1204、总量 1200，报给用户就是「免费剩余 1204/1200」。
-这个数还会经 available 参与「够不够翻这一单」的判断，所以不只是显示难看。
+两件事在这里锁住：
+
+一、上游把 useFreeTranslateQuota 回成过 -4（正好等于上一单的实扣）。这种数不能
+    原样念给用户。
+
+二、更要命的是 available 曾经被算成「免费剩余 + 钱包」。2026-09-04 实测推翻了这个
+    前提：一单全走免费额度（上游记 freeTranslateQuota=1、walletTranslateQuota=0），
+    translateQuota 照样减 1——它本来就是含免费在内的总数，加一次就是重复计，
+    最多虚报 1200，而这个数还会去判断「够不够翻这一单」。现在两个数分开报。
 """
 
 import pytest
@@ -24,27 +30,26 @@ SUB = {"code": "200", "data": {"vipName": "终极版", "vipType": 20,
                                "videoDurationLimit": 60, "videoTranslateConcurrency": 3}}
 
 
-def test_normal_numbers_are_untouched():
+def test_balance_is_translate_quota_alone():
     snap = _build_account_snapshot(wallet(used=200), SUB)
-    assert snap["quota"]["freeLeft"] == 1000
-    assert snap["quota"]["available"] == 1000 + 19635
-    assert "quotaSuspect" not in snap
+    assert snap["quota"]["wallet"] == 19635
+    assert snap["quota"]["freeUsed"] == 200
+    assert snap["quota"]["freeTotal"] == 1200
+    # 免费那两个数是用量计数，不是另一份余额——不许再出现合计
+    assert "available" not in snap["quota"]
+    assert "freeLeft" not in snap["quota"]
 
 
-def test_negative_used_quota_is_clamped_not_passed_through():
+def test_negative_used_quota_is_flagged_not_passed_through():
     snap = _build_account_snapshot(wallet(used=-4), SUB)
-    # 剩余不能比总量还大
-    assert snap["quota"]["freeLeft"] == 1200
-    assert snap["quota"]["freeLeft"] <= snap["quota"]["freeTotal"]
-    # available 跟着往小里走，别让一个虚高的余额去替用户判断够不够翻
-    assert snap["quota"]["available"] == 1200 + 19635
-    assert "-4" in snap["quotaSuspect"] and "不自洽" in snap["quotaSuspect"]
+    assert "-4" in snap["quotaSuspect"] and "说不通" in snap["quotaSuspect"]
+    # 余额本身不受影响：它是上游直接给的数，没参与那个减法
+    assert snap["quota"]["wallet"] == 19635
 
 
-def test_used_beyond_total_still_floors_at_zero():
+def test_used_beyond_total_is_flagged_too():
     snap = _build_account_snapshot(wallet(used=5000), SUB)
-    assert snap["quota"]["freeLeft"] == 0
-    assert "quotaSuspect" not in snap
+    assert "quotaSuspect" in snap
 
 
 class FakeClient:
@@ -65,18 +70,22 @@ async def test_status_says_the_free_quota_is_unreliable():
 
 
 @pytest.mark.asyncio
-async def test_status_stays_quiet_when_the_numbers_add_up():
+async def test_status_reports_the_two_numbers_separately():
     snap = _build_account_snapshot(wallet(used=200), SUB)
     out = await _account_status(FakeClient(snap))
     assert "对不上" not in out["msg"]
-    assert "免费剩余 1000/1200" in out["msg"]
+    assert "可用额度 19635" in out["msg"]
+    assert "今日免费已用 200/1200" in out["msg"]
+    # 合计数一个都不许出现：19635 + 1000 = 20635
+    assert "20635" not in out["msg"]
+    assert "一个都不要相加" in out["msg"]
 
 
-# ---- OCR 是另一本账 ----------------------------------------------------------
-# 全项目都在跟模型强调「扫描件扣的是 OCR 额度，和普通翻译不是同一本账」，可
-# get_account_status 报出去的那句话里一个 OCR 数字都没有：快照只把钱包那半截
-# 原样带出来（还是个没人读的 key），免费那半截整个丢了。用户问「OCR 还剩多少」
-# 只能拿普通额度顶上——那是另一本账的数。
+# ---- OCR 那组数字 ------------------------------------------------------------
+# 2026-09-04 测试环境对照：同模型同语言对各翻一页，scanned.pdf（isOcr=1）和
+# text.pdf（isOcr=0）对钱包的影响一模一样——translateQuota -1、ocrTranslateQuota -1、
+# useFreeTranslateQuota +1、useFreeOcrTranslateQuota +1。连不走 OCR 那单都把
+# useFreeOcrTranslateQuota 加了 1。所以这组数照报，但不是另一份余额。
 
 def wallet_with_ocr(**over):
     data = {
@@ -92,34 +101,30 @@ def wallet_with_ocr(**over):
     return {"code": "200", "data": data}
 
 
-def test_ocr_ledger_counts_its_own_free_quota():
+def test_ocr_numbers_are_reported_as_given():
     snap = _build_account_snapshot(wallet_with_ocr(), SUB)
-    assert snap["quota"]["ocrFreeLeft"] == 900        # 1200 - 300
-    assert snap["quota"]["ocrAvailable"] == 900 + 500
-    # 两本账各算各的，别串
-    assert snap["quota"]["available"] == 1181 + 19612
+    assert snap["quota"]["ocrWallet"] == 500
+    assert snap["quota"]["ocrFreeUsed"] == 300
+    assert snap["quota"]["ocrFreeTotal"] == 1200
+    assert "ocrAvailable" not in snap["quota"]
 
 
-def test_ocr_free_quota_is_clamped_like_the_normal_one():
+def test_ocr_free_counter_is_flagged_like_the_normal_one():
     snap = _build_account_snapshot(wallet_with_ocr(useFreeOcrTranslateQuota=-4), SUB)
-    assert snap["quota"]["ocrFreeLeft"] == 1200
     assert "OCR" in snap["quotaSuspect"]
 
 
 def test_missing_ocr_fields_are_not_reported_as_zero():
-    """老服务端不回 OCR 字段：整本不报，报成 0 会被念成「OCR 额度用完了」"""
+    """老服务端不回 OCR 字段：整组不报，报成 0 会被念成「OCR 额度用完了」"""
     snap = _build_account_snapshot(wallet(used=200), SUB)
-    assert "ocrAvailable" not in snap["quota"]
+    assert "ocrWallet" not in snap["quota"]
 
 
 @pytest.mark.asyncio
-async def test_account_status_says_all_three_ledgers():
-    class Fake:
-        async def account_snapshot(self, refresh: bool = False):
-            return _build_account_snapshot(wallet_with_ocr(), SUB)
-
-    result = await _account_status(Fake())
-    assert "OCR 额度 1400" in result["msg"]
-    assert "高级模型额度 125" in result["msg"]
-    # OCR 那组不能当成另一份余额加上去，这句得说出来
-    assert "不是另一份能加上去的余额" in result["msg"]
+async def test_account_status_lists_ocr_and_advanced_without_summing():
+    snap = _build_account_snapshot(wallet_with_ocr(), SUB)
+    out = await _account_status(FakeClient(snap))
+    assert "可用额度 19612" in out["msg"]
+    assert "OCR 额度 500" in out["msg"]
+    assert "高级模型额度 125" in out["msg"]
+    assert "不是另一份余额" in out["msg"]

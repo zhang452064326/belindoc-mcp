@@ -521,7 +521,7 @@ async def _submit_video_translate(client, args):
     # 余额不够只提示、不拦：免费额度另有按月重置和月度时长两本账，本地算不全，
     # 真正说了算的是服务端。把数字摆给用户，让他自己判断。
     quota_warning = ""
-    available = (snapshot.get("quota") or {}).get("available")
+    available = (snapshot.get("quota") or {}).get("wallet")
     needed = calc.get("quota")
     if available is not None and needed is not None and available < needed:
         quota_warning = i18n.t("warn.quota", available=available, needed=needed)
@@ -705,7 +705,7 @@ async def _video_quota(client, duration_ms: float, voice_role: str, subtitle_typ
             "告诉用户，让他决定是剪短还是升级会员，不要先上传再说。"
         )
     quota_info = snapshot.get("quota") or {}
-    available = quota_info.get("available")
+    available = quota_info.get("wallet")
     needed = data.get("translateQuota")
     if available is not None and needed is not None and available < needed:
         result["quotaWarning"] = (
@@ -778,20 +778,18 @@ async def _account_status(client, refresh: bool = False) -> dict:
     limits = snapshot.get("limits") or {}
     parts = []
     if quota:
-        parts.append(
-            f"可用额度 {quota.get('available')}"
-            f"（免费剩余 {quota.get('freeLeft')}/{quota.get('freeTotal')}，"
-            f"钱包 {quota.get('wallet')}）"
-        )
+        # 两个数分开报，不给合计：translateQuota 本来就含了今日免费的消耗，
+        # 加一次就是重复计（实测最多虚报 1200）。
+        parts.append(f"可用额度 {quota.get('wallet')}")
+        parts.append(f"今日免费已用 {quota.get('freeUsed')}/{quota.get('freeTotal')}")
         # 上游把 OCR 这组额度单独发一份，但 2026-09-04 在测试环境实测：一页扫描件
         # （isOcr=1）和一页文本 PDF（isOcr=0）各翻一单，四个字段的增减一模一样，
-        # 连非 OCR 那单都把 useFreeOcrTranslateQuota 加了 1。所以这组数照报，但
-        # 不能说成「另一本可用额度」，更不能加到 available 上。
-        if quota.get("ocrAvailable") is not None:
+        # 连非 OCR 那单都把 useFreeOcrTranslateQuota 加了 1。数照报，但它不是
+        # 另一份能加上去的余额。
+        if quota.get("ocrWallet") is not None:
             parts.append(
-                f"OCR 额度 {quota.get('ocrAvailable')}"
-                f"（免费剩余 {quota.get('ocrFreeLeft')}/{quota.get('ocrFreeTotal')}，"
-                f"钱包 {quota.get('ocrWallet')}）"
+                f"OCR 额度 {quota.get('ocrWallet')}"
+                f"（今日免费已用 {quota.get('ocrFreeUsed')}/{quota.get('ocrFreeTotal')}）"
             )
         if quota.get("advanced") is not None:
             parts.append(f"高级模型额度 {quota.get('advanced')}")
@@ -806,10 +804,11 @@ async def _account_status(client, refresh: bool = False) -> dict:
         parts.append(f"视频任务同时最多 {limits['videoConcurrency']} 个")
     msg = (
         "；".join(parts)
-        + "。这些数字请原样转述，不要自己换算、取整或者相加。报「还剩多少」一律"
-        "报可用额度那个数；OCR 那组是上游单独发的一份，实测和普通额度同步增减，"
-        "不是另一份能加上去的余额。额度是账户余额，和某一单的实扣不是一回事。"
-        "免费用户另有「每月累计视频时长」上限，本接口看不到，超了要到提交时才会被拒。"
+        + "。这些数字请原样转述，一个都不要相加：可用额度那个数已经含了今日免费的"
+        "消耗，报「还剩多少」就报它；「今日免费已用」是用量计数，不是另一份余额，"
+        "OCR 那组同理（实测和可用额度同步增减，走不走 OCR 都一样）。额度是账户余额，"
+        "和某一单的实扣不是一回事。免费用户另有「每月累计视频时长」上限，"
+        "本接口看不到，超了要到提交时才会被拒。"
     )
     # 上游偶尔会把免费额度回成对不上的数。原样转述的要求在前，这里必须把
     # 「这一项不可信」一并说出去，否则模型会照着念一个自相矛盾的余额。
@@ -964,7 +963,7 @@ TOOLS = [
     ),
     Tool(
         name="get_account_status",
-        description="查询账户的可用额度、会员档位和各项限额。要报余额、要判断「够不够翻这一单」时用它——额度数字必须来自本工具，不要从之前某一单的实扣去推算，两者不是一回事（那是本次消耗，不是余额）。返回里 available 是可用额度，报余额就报它。ocrAvailable 是上游单独发的一组 OCR 数字，实测和 available 同步增减（走不走 OCR 都一样），所以它不是另一份余额、不要加上去。advanced 是高级模型额度（get_model_list 里 coefficient>1 的那几个），这一项还没实测过归属。limits 是当前会员档的硬限制：videoDurationMinutes 单个视频最长多少分钟、videoConcurrency 视频任务能同时跑几个、uploadFileSizeMB 单文件多大。这些限制服务端会真的按它拒绝提交，所以准备翻一个长视频之前先看一眼。注意免费用户另有「每月累计视频时长」上限，本接口看不到，只有提交时才会撞上。查不到时返回 code=500，请如实告诉用户查不到，不要拿估算值顶上。",
+        description="查询账户的可用额度、会员档位和各项限额。要报余额、要判断「够不够翻这一单」时用它——额度数字必须来自本工具，不要从之前某一单的实扣去推算，两者不是一回事（那是本次消耗，不是余额）。返回里 quota.wallet 是可用额度，报余额就报它——它已经含了今日免费的消耗，别再拿 freeUsed/freeTotal 去加。freeUsed/freeTotal 是今日免费额度的用量计数，ocrWallet/ocrFreeUsed 是上游单独发的一组 OCR 数字（实测和 wallet 同步增减，走不走 OCR 都一样），这两组都不是另一份余额。advanced 是高级模型额度（get_model_list 里 coefficient>1 的那几个），归属还没实测过。limits 是当前会员档的硬限制：videoDurationMinutes 单个视频最长多少分钟、videoConcurrency 视频任务能同时跑几个、uploadFileSizeMB 单文件多大。这些限制服务端会真的按它拒绝提交，所以准备翻一个长视频之前先看一眼。注意免费用户另有「每月累计视频时长」上限，本接口看不到，只有提交时才会撞上。查不到时返回 code=500，请如实告诉用户查不到，不要拿估算值顶上。",
         inputSchema={
             "type": "object",
             "properties": {
