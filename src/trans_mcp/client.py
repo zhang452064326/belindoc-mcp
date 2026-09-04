@@ -1363,18 +1363,50 @@ class TranslationClient:
     # ============ 模型相关 ============
     
     async def get_model_list(self) -> dict:
-        """获取翻译模型列表，返回当前用户可用的模型名称列表"""
+        """获取翻译模型列表，按当前账号的会员档位筛出真正能用的
+
+        上游把全量模型都回下来，每条自带 vipType（用它需要的最低档位）。这里
+        原先写死 vipType<=0 当作「可用」，等于假定谁都是免费用户：实测 Ultimate
+        （vipType=20）账号十个模型只看得见两个，GPT-5.5、Gemini-3.1-Pro、
+        Claude-haiku-4-5 这些买了的全被自己滤掉了。改成拿账号自己的档位去比。
+
+        查不到档位（老服务端没有 /external/user、或者网络抖）就全量返回并说明
+        情况——宁可把一个可能不可用的模型摆出来让服务端去拒，也不能反过来把
+        用户已经付过钱的模型藏起来。
+        """
         response = await self.client.post(f"{DOC_PREFIX}/getModelList", json={})
         response.raise_for_status()
         result = response.json()
-        
-        # 只返回可用的模型名称列表
-        if result.get("code") == "200":
-            models = result.get("data", [])
-            # vipType: -1 或 0 表示免费可用，其他需要对应VIP等级
-            available_models = [m["version"] for m in models if m.get("vipType", 0) <= 0]
-            return {"code": "200", "data": available_models, "msg": "请让用户从以下可用模型中选择一个"}
-        return result
+        if result.get("code") != "200":
+            return result
+
+        models = result.get("data") or []
+        snapshot = await self.account_snapshot()
+        tier = (snapshot.get("vip") or {}).get("type") if snapshot.get("ok") else None
+
+        available, locked = [], []
+        for m in models:
+            need = m.get("vipType") or 0
+            entry = {"model": m.get("version"), "coefficient": m.get("coefficient") or 1}
+            if tier is None or need <= tier:
+                available.append(entry)
+            else:
+                locked.append({**entry, "requiresVipType": need})
+
+        # coefficient 是计费倍率：同样一页，倍率 3 的模型扣三倍额度。用户挑模型
+        # 时这是要摆在台面上的信息，不能只报个名字。
+        msg = "请让用户从 data 里选一个模型。coefficient 是计费倍率，3 表示同样的量扣三倍额度。"
+        if tier is None:
+            msg += "（没查到本账号的会员档位，这里给的是上游全量模型；档位不够的提交时会被服务端拒掉。）"
+        elif locked:
+            msg += f"另有 {len(locked)} 个模型当前档位（vipType={tier}）用不了，列在 locked 里，别拿它们去提交。"
+
+        out = {"code": "200", "data": available, "msg": msg}
+        if locked:
+            out["locked"] = locked
+        if tier is not None:
+            out["vipType"] = tier
+        return out
     
     # ============ 配额相关 ============
     

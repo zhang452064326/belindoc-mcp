@@ -946,7 +946,7 @@ TOOLS = [
     ),
     Tool(
         name="get_model_list",
-        description="获取当前用户可用的翻译模型列表。请在调用 translate_document 之前调用此工具，并让用户选择一个模型。",
+        description="获取当前用户可用的翻译模型列表。请在调用 translate_document 之前调用此工具，并让用户选择一个模型。返回的 data 是对象列表：model 是提交时要填的模型名，coefficient 是计费倍率——倍率 3 的模型翻同样的量扣三倍额度，请把倍率一并告诉用户再让他选。locked 里是当前会员档位还用不了的模型，不要拿它们去提交。",
         inputSchema={"type": "object", "properties": {}}
     ),
     Tool(
