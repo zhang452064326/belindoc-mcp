@@ -1801,8 +1801,11 @@ class TranslationClient:
         """
         if not object_key or ocr_of(object_key) or object_key in _OCR_TASKS:
             return
+        # 这里必须挂真去打上游的那个协程，不能挂 detect_ocr_for_key：后台任务
+        # 一进 _OCR_TASKS，detect_ocr_for_key 开头那句「已经有人在测了，等它」
+        # 等到的就是任务自己，死等到超时，上游一趟都没打出去。
         task = asyncio.ensure_future(
-            self.detect_ocr_for_key(object_key, file_name, timeout=120.0)
+            self._run_ocr_detection(object_key, file_name, timeout=120.0)
         )
         _OCR_TASKS[object_key] = task
 
@@ -1822,13 +1825,21 @@ class TranslationClient:
         if cached:
             return cached
         running = _OCR_TASKS.get(object_key)
-        if running is not None:
+        if running is not None and running is not asyncio.current_task():
             # 上传那会儿已经发出去了，等它就好，别再打一趟。等不及也不取消——
             # 它跑完照样会把结果写进缓存，下一次就能直接取。
+            # 排除自己：后台任务跑的就是这段路，等自己等不出结果。
             try:
                 return await asyncio.wait_for(asyncio.shield(running), timeout)
             except Exception:
                 return None
+        return await self._run_ocr_detection(object_key, file_name, timeout)
+
+    async def _run_ocr_detection(
+        self, object_key: str, file_name: str = "", timeout: float = 60.0
+    ) -> Optional[dict]:
+        """真去打上游那一趟并把结果记下来。不看 _OCR_TASKS——后台任务自己就在
+        里面，看了就是等自己。"""
         try:
             result = await self.check_file_is_ocr(object_key, timeout=timeout)
         except Exception:

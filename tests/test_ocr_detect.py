@@ -192,3 +192,42 @@ async def test_check_pdf_ocr_does_not_block_on_a_slow_file(client, monkeypatch):
     assert tools_result["data"]["detecting"] is True
     assert "k/slow.pdf" in client_mod._OCR_TASKS      # 检测确实在后台跑着
     client_mod._OCR_TASKS["k/slow.pdf"].cancel()
+
+
+@pytest.mark.asyncio
+async def test_background_detection_actually_calls_upstream(client):
+    """上传时发出去的那趟检测得真打到上游
+
+    原先 start_ocr_detection 挂的是 detect_ocr_for_key 自己，而它一进
+    _OCR_TASKS，开头那句「已经有人在测了，等它」等到的就是任务自己——死等到
+    120 秒超时，上游一趟都没打出去。表现是 check_pdf_ocr 一直回「还在检测」，
+    而同一个 objectKey 直接打上游 1 秒就有答案。扫描件因此被当普通 PDF 提交，
+    翻出来一片空白，还扣错了那本账。
+    """
+    import asyncio
+
+    calls = make_client(client, {"isOcr": 1, "isDoubleDeck": 0})
+    client.start_ocr_detection("k/scan.pdf", "scan.pdf")
+
+    # 没有任何人去 await 它，它也该自己跑完
+    for _ in range(50):
+        if client_mod.ocr_of("k/scan.pdf"):
+            break
+        await asyncio.sleep(0.01)
+
+    assert [url for url, _ in calls if url.endswith("/isOcr")], "后台检测没打到上游"
+    assert client_mod.ocr_of("k/scan.pdf")["isOcr"] == 1
+
+
+@pytest.mark.asyncio
+async def test_check_pdf_ocr_answers_from_the_background_task(client):
+    """后台已经测完的，check_pdf_ocr 直接给答案，不再回「还在检测」"""
+    import asyncio
+
+    make_client(client, {"isOcr": 1, "isDoubleDeck": 0})
+    client.start_ocr_detection("k/scan2.pdf", "scan2.pdf")
+    await asyncio.sleep(0.05)
+
+    result = await tools._check_pdf_ocr(client, "k/scan2.pdf", "scan2.pdf")
+    assert result["code"] == "200"
+    assert result["data"]["isOcr"] == 1
