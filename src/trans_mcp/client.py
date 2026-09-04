@@ -699,6 +699,13 @@ def ocr_of(object_key: str):
 _OCR_TASKS: dict = {}
 # 提交时最多等检测多久。见 _detect_ocr 的说明：这一步在提交里面，等满就等于
 # 让调用方超时重试，而重试会真的多出一单。
+#
+# 别把它往大了调。isOcr 在大文件上常跑 > 30 秒（网页端为此把 Next dev 代理的
+# proxyTimeout 从默认 30 秒提到 120 秒，见 free-pdf-translate next.config.js），
+# 但那 120 秒的预算属于上传时发出去的后台任务（start_ocr_detection 传的就是
+# 120），不属于提交这一趟。提交这趟只是「顺手看看后台测完没有」，等不到就
+# fail-open——服务端的自动 OCR 会在受理时自己再判一次（实测：一单以 is_ocr=0
+# 提交，落库仍是 isOcr=1）。
 _SUBMIT_OCR_WAIT = 15.0
 
 
