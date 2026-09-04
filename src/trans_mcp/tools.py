@@ -448,7 +448,7 @@ async def _submit_video_rewrite(client, args) -> dict:
                 order_no, source_txt, target_txt, args.get("video_task_param")
             )
 
-    # 问不到真人（HTTP 传输、或客户端不支持弹窗）：退回两步握手
+    # 问不到真人（客户端没声明 elicitation 能力、或发起失败）：退回两步握手
     return {
         "code": "409",
         "data": {
@@ -594,7 +594,7 @@ async def _submit_video_translate(client, args):
             voice_role = picked["voiceRole"]
             subtitle_type = picked["subtitleType"]
         else:
-            # 问不到真人（HTTP 传输、客户端不支持 elicitation、或发起失败）：
+            # 问不到真人（客户端没声明 elicitation 能力、或发起失败）：
             # 退回两步握手，把整张菜单和每格的确认码还给用户。
             return {
                 "code": "409",
