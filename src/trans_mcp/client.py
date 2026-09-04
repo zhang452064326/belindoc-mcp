@@ -697,6 +697,9 @@ def ocr_of(object_key: str):
 # （UploadFileSection 的 axios.put.then 里），这边照做：上传返回不等它，等到
 # 提交翻译时再来收结果，那会儿多半早就回来了。
 _OCR_TASKS: dict = {}
+# 提交时最多等检测多久。见 _detect_ocr 的说明：这一步在提交里面，等满就等于
+# 让调用方超时重试，而重试会真的多出一单。
+_SUBMIT_OCR_WAIT = 15.0
 
 
 # 双层 PDF = 图片上盖了一层文字（多半是别处 OCR 过一遍留下的）。直接翻会翻到
@@ -1829,7 +1832,14 @@ class TranslationClient:
                 return await asyncio.wait_for(asyncio.shield(running), timeout)
             except Exception:
                 return None
-        return await self._run_ocr_detection(object_key, file_name, timeout)
+        # 硬性挂钟上限：光靠 httpx 的 timeout 不够稳（重试、慢响应体都能拖过头），
+        # 而这个函数的调用方之一是提交流程，拖过头就是让调用方超时重试。
+        try:
+            return await asyncio.wait_for(
+                self._run_ocr_detection(object_key, file_name, timeout), timeout
+            )
+        except Exception:
+            return None
 
     async def _run_ocr_detection(
         self, object_key: str, file_name: str = "", timeout: float = 60.0
@@ -1860,6 +1870,15 @@ class TranslationClient:
 
         检测失败就当没检测过：宁可按调用方给的值提交，也不能因为一个辅助接口
         抽风把整批任务卡住。
+
+        这里等多久是有讲究的：这一步是**夹在提交里面**的，等太久整个
+        translate_document 就在调用方那边超时了，而调用方多半会原样重试一次——
+        上游对文档提交不去重，于是同一份文件出两单、扣两次费（2026-09-04 实测：
+        一份大 PDF 出了 TR...165354 和 TR...165445 两单，各扣 428）。所以这里
+        只给一个短上限，等不到就当没测过往下走。检测本来就是上传那会儿发出去的，
+        正常流程走到这儿早回来了。网页端也是这个取向：它给 isOcr 留了 120 秒，
+        但那 120 秒在上传的 .then 里烧，从不挡着提交（free-pdf-translate
+        src/store/trans.ts checkPdfIsOcrBatch，超时/非 200 一律 fail-open）。
         """
         targets = [
             f for f in files
@@ -1878,9 +1897,15 @@ class TranslationClient:
                 pending.append(item)
         if not pending:
             return detected
+        # 先确保后台在测：这样即便下面等不及把它放掉，那一趟也还在跑，结果会落进
+        # 缓存，调用方稍后重试就能直接取到，不用再等一遍。
+        for item in pending:
+            self.start_ocr_detection(item["fileObjectKey"], item.get("fileName", ""))
         results = await asyncio.gather(
             *[
-                self.detect_ocr_for_key(f["fileObjectKey"], f.get("fileName", ""))
+                self.detect_ocr_for_key(
+                    f["fileObjectKey"], f.get("fileName", ""), timeout=_SUBMIT_OCR_WAIT
+                )
                 for f in pending
             ],
             return_exceptions=True,

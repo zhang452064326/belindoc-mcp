@@ -231,3 +231,41 @@ async def test_check_pdf_ocr_answers_from_the_background_task(client):
     result = await tools._check_pdf_ocr(client, "k/scan2.pdf", "scan2.pdf")
     assert result["code"] == "200"
     assert result["data"]["isOcr"] == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_does_not_hang_on_a_slow_detection(client, monkeypatch):
+    """检测慢不能把提交拖到调用方超时
+
+    这一步夹在 translate_document 里面。等满了调用方就超时，而它多半会原样重试
+    ——上游对文档提交不去重，于是同一份文件出两单、扣两次费（2026-09-04 实测：
+    一份大 PDF 出了 TR...165354 和 TR...165445 两单，各扣 428）。等不到就当没
+    测过往下走，msg 里已经会说「没能判断是不是扫描件」。
+    """
+    import asyncio
+    import time
+
+    calls = []
+
+    async def slow_post(url, json=None, **kwargs):
+        calls.append(url)
+        if url.endswith("/isOcr"):
+            await asyncio.sleep(30)          # 上游这一趟要下载并分析整个 PDF
+            return FakeResponse({"code": "200", "data": {"isOcr": 1, "isDoubleDeck": 0}})
+        if url.endswith("searchTranslateFilePage"):
+            return FakeResponse({"code": "200", "data": {"records": []}})
+        return FakeResponse({"code": "200", "data": {}})
+
+    client.client.post = slow_post
+    monkeypatch.setattr(client_mod, "_SUBMIT_OCR_WAIT", 0.2)
+
+    t0 = time.monotonic()
+    result = await client.batch_submit_translate_task(
+        [{"fileName": "big.pdf", "fileObjectKey": "k/big.pdf"}], "en", "zh-CN"
+    )
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 5, f"提交被检测拖了 {elapsed:.1f} 秒"
+    assert result["code"] == "200"
+    assert "没能判断是不是扫描件" in result["msg"]
+    assert any(url.endswith("batchSubmitTranslateTask") for url in calls)
