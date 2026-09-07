@@ -233,8 +233,8 @@ twine upload dist/*
 发之前先把 `pyproject.toml` 的 `version` 加上去——PyPI 的同一版本号只能传一次。
 `python -m build` 之前先 `rm -rf dist/`，否则旧版本会跟着一起传上去。
 
-包是公开的，所以别往仓库里放任何只该留在内部的东西：`docs/` 不进包，但 `README.md`
-会原样变成 PyPI 首页，`tests/` 会进 sdist。加内容前对着 `tar tzf dist/*.tar.gz` 看一眼。
+包是公开的，所以别往仓库里放任何只该留在内部的东西：`README.md` 会原样变成 PyPI
+首页，`tests/` 会进 sdist。加内容前对着 `tar tzf dist/*.tar.gz` 看一眼。
 
 根目录的 `test_api.py` / `test_upload.py` 是手动连真实 API 的冒烟脚本，不是用例，
 pytest 只收集 `tests/`。
@@ -260,7 +260,6 @@ trans-mcp/
 │   ├── client.py          # 上游 API 客户端
 │   └── i18n.py            # 用户可见文案的九种语言
 ├── tests/
-├── docs/                  # 上游开放 API 文档
 ├── deploy.sh              # Docker 部署
 ├── deploy-linux.sh        # systemd 部署
 └── server.sh              # 本机起停

@@ -23,7 +23,7 @@ from .i18n import t
 DEFAULT_API_BASE_URL = "https://belindoc.com/api"
 API_BASE_URL = os.environ.get("BELINDOC_API_BASE_URL", "").strip().rstrip("/") or DEFAULT_API_BASE_URL
 DOC_PREFIX = "/external/translate"
-# 上游瞬时错误码，重试即可（见 docs/document-translation-api-guide.md 常见错误）：
+# 上游瞬时错误码，重试即可（见上游开放 API 文档的「常见错误」一节）：
 #   600   System is busy
 #   30010 并发任务超过限制，等在跑的任务完成后重试
 #   30012 任务重复提交，稍后重试
