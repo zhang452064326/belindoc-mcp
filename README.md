@@ -32,7 +32,7 @@ pipx install trans-mcp
 | 变量 | 用在哪 | 说明 |
 |------|--------|------|
 | `BELINDOC_API_KEY` | stdio | 必需。格式 `ft_` + 40 位随机串，共 43 字符 |
-| `BELINDOC_API_BASE_URL` | 都 | 上游地址。不设即测试环境 `http://internal-test-host:6101`；生产填 `https://belindoc.com/api` |
+| `BELINDOC_API_BASE_URL` | 都 | 上游地址。不设即生产 `https://belindoc.com/api`；要打到别的环境才需要设 |
 | `MCP_HOST` / `MCP_PORT` | HTTP | 监听地址与端口，默认 `0.0.0.0:8080` |
 | `MCP_PATH` | HTTP | MCP 服务端点路径，默认 `/mcp`。同域名下落地页占了 `/mcp` 时挪开 |
 | `MCP_LOCALE` | 都 | 用户可见文案的语言，默认 `zh`。见下方「输出语言」 |

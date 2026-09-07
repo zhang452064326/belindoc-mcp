@@ -10,7 +10,7 @@ services:
       - MCP_PORT=8080
       # 落地页占用 /mcp 时改这里，客户端 URL 要同步改
       - MCP_PATH=${MCP_PATH:-/mcp}
-      # 上游地址，不设即测试环境；生产环境传 https://belindoc.com/api
+      # 上游地址，不设即生产 https://belindoc.com/api；打测试环境才传这个变量
       - BELINDOC_API_BASE_URL=${BELINDOC_API_BASE_URL:-}
     restart: unless-stopped
     healthcheck:

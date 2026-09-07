@@ -5,7 +5,7 @@
 | 变量 | 用在哪 | 默认 | 说明 |
 |------|--------|------|------|
 | `BELINDOC_API_KEY` | stdio | 无，必填 | `ft_` + 40 位随机串，共 43 字符 |
-| `BELINDOC_API_BASE_URL` | 都 | `http://internal-test-host:6101`（测试环境） | 生产填 `https://belindoc.com/api` |
+| `BELINDOC_API_BASE_URL` | 都 | `https://belindoc.com/api`（生产） | 要打到别的环境才需要设 |
 | `MCP_HOST` | HTTP | `0.0.0.0` | 监听地址 |
 | `MCP_PORT` | HTTP | `8080` | 监听端口 |
 | `MCP_PATH` | HTTP | `/mcp` | MCP 服务端点路径。同域名下落地页占了 `/mcp` 时挪开，客户端 URL 要同步改 |
