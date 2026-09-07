@@ -7,7 +7,7 @@ Belindoc 翻译开放 API 的 MCP 服务：文档（PDF / Word / Excel / Markdow
 
 | | stdio | HTTP 远程 |
 |---|---|---|
-| 入口 | `trans-mcp` | `trans-mcp-http` |
+| 入口 | `belindoc-mcp` | `trans-mcp-http` |
 | 跑在哪 | 用户自己的机器上 | 一台服务器上，多人共用 |
 | API Key | 服务端从 `BELINDOC_API_KEY` 读 | 每个客户端自己带 `Authorization: Bearer <key>`，服务器不存任何密钥 |
 | 传输 | stdio | Streamable HTTP（SSE + `Mcp-Session-Id`） |
@@ -20,9 +20,9 @@ Belindoc 翻译开放 API 的 MCP 服务：文档（PDF / Word / Excel / Markdow
 从 PyPI 装即可，不用 clone 源码：
 
 ```bash
-uvx trans-mcp          # 试跑一下；客户端配置里也直接这么写，不用预装
+uvx belindoc-mcp       # 试跑一下；客户端配置里也直接这么写，不用预装
 # 或者
-pipx install trans-mcp
+pipx install belindoc-mcp
 ```
 
 从源码装（开发、或要改代码）见 [开发](#开发)。
@@ -53,7 +53,7 @@ HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器�
   "mcpServers": {
     "trans-mcp": {
       "command": "uvx",
-      "args": ["trans-mcp"],
+      "args": ["belindoc-mcp"],
       "env": {
         "BELINDOC_API_KEY": "ft_你的API密钥"
       }
@@ -69,14 +69,15 @@ Codex 是 `~/.codex/config.json`。
 （`curl -LsSf https://astral.sh/uv/install.sh | sh`）。
 
 **从源码装的话**，`command` 必须填绝对路径——`pip install -e .` 之后 venv 里会生成
-`trans-mcp` 这个可执行文件，填它的完整路径（形如 `/path/to/trans-mcp/.venv/bin/trans-mcp`）。
-客户端不走登录 shell，`PATH` 里通常没有这个 venv，写裸命令名会起不来。
+`belindoc-mcp` 这个可执行文件，填它的完整路径（形如
+`/path/to/trans-mcp/.venv/bin/belindoc-mcp`）。客户端不走登录 shell，`PATH` 里通常没有
+这个 venv，写裸命令名会起不来。
 
 不想把 key 写进客户端配置的话，也可以放进项目根目录的 `.env`，启动时自己加载：
 
 ```bash
 cp .env.example .env   # 填入 API Key
-source .env && trans-mcp
+source .env && belindoc-mcp
 ```
 
 ### HTTP 远程
@@ -239,6 +240,10 @@ twine upload dist/*
 pytest 只收集 `tests/`。
 
 ### 项目结构
+
+PyPI 包名是 `belindoc-mcp`，仓库目录和 Python 模块仍叫 `trans-mcp` / `trans_mcp`——
+后两个用户看不见，跟着改要动 Dockerfile、systemd 单元和已在跑的服务器的升级路径。
+`trans-mcp` / `trans-mcp-http` 这两个命令也照旧留着，部署脚本在调它们。
 
 ```
 trans-mcp/

@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "trans-mcp"
+name = "belindoc-mcp"
 version = "0.1.0"
 description = "Belindoc 文档 / 视频翻译的 MCP 服务"
 readme = "README.md"
@@ -39,7 +39,14 @@ dev = [
 [project.urls]
 Homepage = "https://belindoc.com"
 
+# PyPI 包名是 belindoc-mcp，仓库目录和模块仍叫 trans-mcp / trans_mcp——后两个用户
+# 看不见，跟着改要动 Dockerfile 的 CMD、systemd 的 ExecStart 和已在跑的服务器的升级
+# 路径，不值当。
+#
+# belindoc-mcp 是给外部用户的 stdio 入口，名字和包名一致，客户端里直接 uvx belindoc-mcp。
+# trans-mcp / trans-mcp-http 原样留着：start.sh、Dockerfile、systemd 单元都在调它们。
 [project.scripts]
+belindoc-mcp = "trans_mcp.server:main"
 trans-mcp = "trans_mcp.server:main"
 trans-mcp-http = "trans_mcp.http_server:main"
 

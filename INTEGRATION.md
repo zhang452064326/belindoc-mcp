@@ -14,7 +14,7 @@
   "mcpServers": {
     "trans-mcp": {
       "command": "uvx",
-      "args": ["trans-mcp"],
+      "args": ["belindoc-mcp"],
       "env": {
         "BELINDOC_API_KEY": "ft_你的API密钥"
       }
@@ -26,14 +26,14 @@
 `uvx` 自己拉包、自己建隔离环境，不用预装、不用管路径。前提是机器上有 uv
 （`curl -LsSf https://astral.sh/uv/install.sh | sh`）。
 
-从源码装的话，`command` 改填 `pip install -e .` 之后 venv 里那个可执行文件的**绝对路径**
+从源码装的话，`command` 改填 `pip install -e .` 之后 venv 里 `belindoc-mcp` 的**绝对路径**
 （客户端不走登录 shell，`PATH` 里没有这个 venv，裸命令名起不来）。
 
 也可以把变量放进项目根目录的 `.env`，启动时自己加载：
 
 ```bash
 cp .env.example .env   # 填入 API Key
-source .env && trans-mcp
+source .env && belindoc-mcp
 ```
 
 ## HTTP 远程（多人共用一台服务器）
