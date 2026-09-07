@@ -1,0 +1,40 @@
+# 打 tag 就发布到 PyPI。
+#
+# 走 Trusted Publishing（OIDC）：仓库里不存任何 PyPI token，Actions 用 GitHub 签发的
+# 身份去 PyPI 换一次性凭据。要在 PyPI 项目的 Publishing 里先登记这个仓库，
+# 「Workflow name」那栏填的就是本文件的文件名 release.yml。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # OIDC 换凭据全靠它，少了这行 pypi-publish 会以「找不到身份」失败
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # tag 和 pyproject 里的 version 必须一致。对不上就停在这里——PyPI 的同一个
+      # 版本号只能传一次，传错了改不回来，只能跳版本号重发。
+      - name: 核对 tag 与 version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag=$tag  pyproject.version=$ver"
+          [ "$tag" = "$ver" ] || { echo "::error::tag 是 $tag，但 pyproject.toml 写的是 $ver"; exit 1; }
+
+      - name: 构建
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
