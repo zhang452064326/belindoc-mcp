@@ -45,7 +45,7 @@ source .env && trans-mcp
   "mcpServers": {
     "belindoc": {
       "type": "streamablehttp",
-      "url": "http://YOUR_SERVER_IP:8080/mcp",
+      "url": "http://mcp.belindoc.com/mcp",
       "headers": {
         "Authorization": "Bearer ft_你的API密钥"
       }
@@ -58,7 +58,7 @@ Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.
 
 ```toml
 [mcp_servers.belindoc]
-url = "http://YOUR_SERVER_IP:8080/mcp"
+url = "http://mcp.belindoc.com/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
 

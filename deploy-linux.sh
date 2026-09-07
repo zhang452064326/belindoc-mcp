@@ -92,6 +92,7 @@ echo ""
 IP=$(hostname -I | awk '{print $1}')
 echo "MCP 端点: http://$IP:$PORT$MCP_PATH"
 echo "健康检查: http://$IP:$PORT/health"
+echo "对外地址: http://mcp.belindoc.com$MCP_PATH （经 nginx 反代，见 DEPLOY.md）"
 echo ""
 echo -e "${YELLOW}本机配置:${NC}"
 cat << EOF
@@ -99,7 +100,7 @@ cat << EOF
   "mcpServers": {
     "trans-mcp": {
       "type": "streamablehttp",
-      "url": "http://YOUR_SERVER_IP:$PORT$MCP_PATH",
+      "url": "http://mcp.belindoc.com$MCP_PATH",
       "headers": { "Authorization": "Bearer 你的API密钥" }
     }
   }

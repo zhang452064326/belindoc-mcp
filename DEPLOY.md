@@ -77,7 +77,48 @@ chmod +x deploy.sh
 `https://belindoc.com/api`。服务器的 `.env` 里如果没写 `BELINDOC_API_BASE_URL`，升级之后
 就会打到生产。要继续用测试环境，升级前把它显式写进 `.env`。
 
-### 3. 本机配置
+### 3. 反向代理
+
+服务监听 `127.0.0.1:8080`，由 nginx 挂到 `mcp.belindoc.com`：
+
+```nginx
+server {
+    listen 80;
+    server_name mcp.belindoc.com;
+
+    location /mcp {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # Streamable HTTP 的响应是 SSE 流。nginx 默认会把上游响应攒够一块再发，
+        # 那样等待期间的进度通知会全部堵在代理里，客户端要么看不到进度、要么
+        # 一次性收到一堆——必须关掉。
+        proxy_buffering off;
+        proxy_cache off;
+
+        # 翻译任务等几分钟很正常，这期间连接上没有字节。默认 60s 会被反代
+        # 判成超时掐断，wait_for_translation 那类工具就白等了。
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location /health {
+        proxy_pass http://127.0.0.1:8080;
+    }
+}
+```
+
+改完 `nginx -t && systemctl reload nginx`，然后 `curl http://mcp.belindoc.com/health`
+确认通了再配客户端。
+
+只让 nginx 连得上的话，把服务的监听地址收到本机：在 `.env` 里设 `MCP_HOST=127.0.0.1`
+（默认是 `0.0.0.0`，那样 `IP:8080` 也能直连，绕过反代）。
+
+### 4. 本机配置
 
 部署完成后，在客户端配置中添加：
 
@@ -86,7 +127,7 @@ chmod +x deploy.sh
   "mcpServers": {
     "belindoc": {
       "type": "streamablehttp",
-      "url": "http://YOUR_SERVER_IP:8080/mcp",
+      "url": "http://mcp.belindoc.com/mcp",
       "headers": {
         "Authorization": "Bearer 你的API密钥"
       }
@@ -104,7 +145,7 @@ Codex CLI 的 HTTP MCP 无法发送自定义请求头，只能用 Bearer；
 
 ```toml
 [mcp_servers.belindoc]
-url = "http://YOUR_SERVER_IP:8080/mcp"
+url = "http://mcp.belindoc.com/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
 
@@ -127,7 +168,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 {
   "mcpServers": {
     "belindoc": {
-      "url": "http://server:8080/mcp",
+      "url": "http://mcp.belindoc.com/mcp",
       "headers": {
         "Authorization": "Bearer ft_kjo..."
       }
@@ -139,7 +180,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 {
   "mcpServers": {
     "belindoc": {
-      "url": "http://server:8080/mcp",
+      "url": "http://mcp.belindoc.com/mcp",
       "headers": {
         "Authorization": "Bearer ft_abc..."
       }
@@ -158,8 +199,10 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 MCP_PATH=/api/mcp ./server.sh start
 ```
 
-客户端 URL 相应改成 `http://YOUR_SERVER_IP:8080/api/mcp`。
-更省事的做法是把服务放到独立子域名（如 `mcp.example.com/mcp`），不用改任何配置。
+客户端 URL 相应改成 `http://mcp.belindoc.com/api/mcp`。
+
+服务挂在独立子域名 `mcp.belindoc.com` 上，`/mcp` 不会被落地页占用，所以这个变量
+一般用不着——它是留给「和落地页共用一个域名」那种部署的。
 
 ---
 
