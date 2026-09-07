@@ -5,10 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "trans-mcp"
 version = "0.1.0"
-description = "MCP Server for document translation"
+description = "Belindoc 文档 / 视频翻译的 MCP 服务"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
+authors = [{name = "zhangjun"}]
+keywords = ["mcp", "translation", "document", "video", "subtitle"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Linguistic",
+]
 dependencies = [
     "mcp>=2.0.0",
     "httpx>=0.25.0",
@@ -25,9 +36,20 @@ dev = [
     "pytest-asyncio>=0.21.0",
 ]
 
+[project.urls]
+Homepage = "https://belindoc.com"
+
 [project.scripts]
 trans-mcp = "trans_mcp.server:main"
 trans-mcp-http = "trans_mcp.http_server:main"
+
+# 显式声明要打的包。原先靠自动发现，而 src/ 下有个空的 __init__.py，setuptools
+# 把它当成了一个顶层模块——egg-info 的 top_level.txt 里真有一行 `__init__`。
+# 自用无所谓，发到 PyPI 就是往每个用户的 site-packages 里塞一个叫 __init__ 的
+# 顶层模块。那个空文件已经删掉，这里再钉死一遍，防止以后又被误收。
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["trans_mcp*"]
 
 [tool.pytest.ini_options]
 # 根目录的 test_api.py / test_upload.py 是手动连真实 API 的冒烟脚本，

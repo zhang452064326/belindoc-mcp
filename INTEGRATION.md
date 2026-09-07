@@ -13,7 +13,8 @@
 {
   "mcpServers": {
     "trans-mcp": {
-      "command": "/path/to/trans-mcp/.venv/bin/trans-mcp",
+      "command": "uvx",
+      "args": ["trans-mcp"],
       "env": {
         "BELINDOC_API_KEY": "ft_你的API密钥"
       }
@@ -22,7 +23,11 @@
 }
 ```
 
-`command` 填 `pip install -e .` 之后 venv 里那个可执行文件的绝对路径。
+`uvx` 自己拉包、自己建隔离环境，不用预装、不用管路径。前提是机器上有 uv
+（`curl -LsSf https://astral.sh/uv/install.sh | sh`）。
+
+从源码装的话，`command` 改填 `pip install -e .` 之后 venv 里那个可执行文件的**绝对路径**
+（客户端不走登录 shell，`PATH` 里没有这个 venv，裸命令名起不来）。
 
 也可以把变量放进项目根目录的 `.env`，启动时自己加载：
 

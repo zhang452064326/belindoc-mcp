@@ -17,12 +17,15 @@ Belindoc 翻译开放 API 的 MCP 服务：文档（PDF / Word / Excel / Markdow
 
 ## 安装
 
+从 PyPI 装即可，不用 clone 源码：
+
 ```bash
-cd /path/to/trans-mcp
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uvx trans-mcp          # 试跑一下；客户端配置里也直接这么写，不用预装
+# 或者
+pipx install trans-mcp
 ```
+
+从源码装（开发、或要改代码）见 [开发](#开发)。
 
 ## 环境变量
 
@@ -49,7 +52,8 @@ HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器�
 {
   "mcpServers": {
     "trans-mcp": {
-      "command": "/path/to/trans-mcp/.venv/bin/trans-mcp",
+      "command": "uvx",
+      "args": ["trans-mcp"],
       "env": {
         "BELINDOC_API_KEY": "ft_你的API密钥"
       }
@@ -61,7 +65,10 @@ HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器�
 配置文件位置：Claude Desktop 是 `~/Library/Application Support/Claude/claude_desktop_config.json`，
 Codex 是 `~/.codex/config.json`。
 
-`command` 必须是绝对路径——上面「安装」那步 `pip install -e .` 之后，venv 里会生成
+`uvx` 会自己拉包、自己建隔离环境，用户不用预装，也不用管路径。前提是机器上有 uv
+（`curl -LsSf https://astral.sh/uv/install.sh | sh`）。
+
+**从源码装的话**，`command` 必须填绝对路径——`pip install -e .` 之后 venv 里会生成
 `trans-mcp` 这个可执行文件，填它的完整路径（形如 `/path/to/trans-mcp/.venv/bin/trans-mcp`）。
 客户端不走登录 shell，`PATH` 里通常没有这个 venv，写裸命令名会起不来。
 
@@ -207,10 +214,26 @@ API Key 不对、没注册、或格式错（必须 `ft_` 开头共 43 字符）�
 ## 开发
 
 ```bash
+cd /path/to/trans-mcp
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 pytest tests/
 ```
+
+### 发布到 PyPI
+
+```bash
+pip install build twine
+python -m build            # 出 dist/*.whl 和 dist/*.tar.gz
+twine upload dist/*
+```
+
+发之前先把 `pyproject.toml` 的 `version` 加上去——PyPI 的同一版本号只能传一次。
+`python -m build` 之前先 `rm -rf dist/`，否则旧版本会跟着一起传上去。
+
+包是公开的，所以别往仓库里放任何只该留在内部的东西：`docs/` 不进包，但 `README.md`
+会原样变成 PyPI 首页，`tests/` 会进 sdist。加内容前对着 `tar tzf dist/*.tar.gz` 看一眼。
 
 根目录的 `test_api.py` / `test_upload.py` 是手动连真实 API 的冒烟脚本，不是用例，
 pytest 只收集 `tests/`。
