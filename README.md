@@ -25,6 +25,23 @@ uvx belindoc-mcp       # 试跑一下；客户端配置里也直接这么写，�
 pipx install belindoc-mcp
 ```
 
+走 `uvx` 这条路得先有 uv——`uvx` 是它带的命令。没装过就先装：
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows（PowerShell）
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+机器上已经有 Homebrew 或 pip 的话，`brew install uv`、`pip install uv` 也一样。
+
+**装完重开一个终端再往下走**，`uv` 要新开的 shell 才进得了 `PATH`。这步漏掉，后面客户端一
+律报找不到 `uvx`——是整个流程里最常见的失败原因，没有之一。
+
+用 `pipx` 那条路不需要 uv。
+
 从源码装（开发、或要改代码）见 [开发](#开发)。
 
 ## 环境变量
@@ -51,22 +68,45 @@ HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器�
 ```json
 {
   "mcpServers": {
-    "trans-mcp": {
+    "belindoc-mcp": {
+      "type": "stdio",
       "command": "uvx",
       "args": ["belindoc-mcp"],
       "env": {
-        "BELINDOC_API_KEY": "ft_你的API密钥"
+        "BELINDOC_API_KEY": "ft_你的API密钥",
+        "BELINDOC_API_BASE_URL": "https://belindoc.com/api"
       }
     }
   }
 }
 ```
 
+`BELINDOC_API_BASE_URL` 填的就是默认值，不写也一样；要打到别的环境才改它。
+
 配置文件位置：Claude Desktop 是 `~/Library/Application Support/Claude/claude_desktop_config.json`，
 Codex 是 `~/.codex/config.json`。
 
-`uvx` 会自己拉包、自己建隔离环境，用户不用预装，也不用管路径。前提是机器上有 uv
-（`curl -LsSf https://astral.sh/uv/install.sh | sh`）。
+不想手改 JSON 的话，两个客户端都有命令行可以一把加：
+
+```bash
+# Claude Code
+claude mcp add belindoc-mcp \
+  -e BELINDOC_API_KEY=ft_你的API密钥 \
+  -e BELINDOC_API_BASE_URL=https://belindoc.com/api \
+  -- uvx belindoc-mcp
+
+# Codex
+codex mcp add belindoc-mcp \
+  --env BELINDOC_API_KEY=ft_你的API密钥 \
+  --env BELINDOC_API_BASE_URL=https://belindoc.com/api \
+  -- uvx belindoc-mcp
+```
+
+两条只差传环境变量的写法：`claude` 用 `-e`，`codex` 用 `--env`。`--` 后面是真正要跑的命令，
+别漏。
+
+`uvx` 会自己拉包、自己建隔离环境，用户不用预装本项目，也不用管路径——代价是机器上得先有
+uv 本身，见上面的[安装](#安装)。
 
 **从源码装的话**，`command` 必须填绝对路径——`pip install -e .` 之后 venv 里会生成
 `belindoc-mcp` 这个可执行文件，填它的完整路径（形如
@@ -79,6 +119,29 @@ Codex 是 `~/.codex/config.json`。
 cp .env.example .env   # 填入 API Key
 source .env && belindoc-mcp
 ```
+
+### 其他客户端
+
+stdio 这套配置在各家客户端里是同一个东西，换客户端只有三处要对：配置文件在哪、顶层的键叫
+什么、以及那三行本项目自己的内容（`command: uvx`、`args: ["belindoc-mcp"]`、`env` 里的两个
+变量）。第三项到哪都一样，抄上面的 JSON 即可。
+
+前两项：
+
+| 客户端 | 配置文件 | 顶层键 |
+|--------|----------|--------|
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers` |
+| Claude Code | 项目根 `.mcp.json`（或直接 `claude mcp add`） | `mcpServers` |
+| Codex | `~/.codex/config.json`（或直接 `codex mcp add`） | `mcpServers` |
+| Cursor | 项目 `.cursor/mcp.json`，或全局 `~/.cursor/mcp.json` | `mcpServers` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
+| VS Code | 项目 `.vscode/mcp.json` | `servers` |
+
+这张表会过期——各家的路径和键名都改过不止一次，装之前对一眼自己客户端的当前文档。跟本项目
+有关的部分不会变。
+
+装完起不来，先查两条：`uvx` 在不在客户端能看到的 `PATH` 里（客户端不走登录 shell，装完 uv
+没重开终端最常见），以及 key 有没有填对。
 
 ### HTTP 远程
 
