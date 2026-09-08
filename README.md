@@ -73,7 +73,7 @@ HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器�
       "command": "uvx",
       "args": ["belindoc-mcp"],
       "env": {
-        "BELINDOC_API_KEY": "ft_你的API密钥",
+        "BELINDOC_API_KEY": "ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         "BELINDOC_API_BASE_URL": "https://belindoc.com/api"
       }
     }
@@ -91,13 +91,13 @@ Codex 是 `~/.codex/config.json`。
 ```bash
 # Claude Code
 claude mcp add belindoc-mcp \
-  -e BELINDOC_API_KEY=ft_你的API密钥 \
+  -e BELINDOC_API_KEY=ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   -e BELINDOC_API_BASE_URL=https://belindoc.com/api \
   -- uvx belindoc-mcp
 
 # Codex
 codex mcp add belindoc-mcp \
-  --env BELINDOC_API_KEY=ft_你的API密钥 \
+  --env BELINDOC_API_KEY=ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
   --env BELINDOC_API_BASE_URL=https://belindoc.com/api \
   -- uvx belindoc-mcp
 ```
@@ -152,7 +152,7 @@ stdio 这套配置在各家客户端里是同一个东西，换客户端只有�
       "type": "streamablehttp",
       "url": "http://mcp.belindoc.com/mcp",
       "headers": {
-        "Authorization": "Bearer ft_你的API密钥"
+        "Authorization": "Bearer ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
     }
   }

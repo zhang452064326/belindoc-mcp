@@ -7,7 +7,7 @@
 ```
 客户端 A (张三)                 客户端 B (李四)
     ↓                              ↓
-Authorization: Bearer ft_kjo...   Authorization: Bearer ft_abc...
+Authorization: Bearer ft_aaa...   Authorization: Bearer ft_bbb...
     ↓                              ↓
     └──────────┬───────────────────┘
                ↓
@@ -170,7 +170,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
     "belindoc": {
       "url": "http://mcp.belindoc.com/mcp",
       "headers": {
-        "Authorization": "Bearer ft_kjo..."
+        "Authorization": "Bearer ft_aaa..."
       }
     }
   }
@@ -182,7 +182,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
     "belindoc": {
       "url": "http://mcp.belindoc.com/mcp",
       "headers": {
-        "Authorization": "Bearer ft_abc..."
+        "Authorization": "Bearer ft_bbb..."
       }
     }
   }

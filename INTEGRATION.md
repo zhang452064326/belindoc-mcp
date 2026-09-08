@@ -16,7 +16,7 @@
       "command": "uvx",
       "args": ["belindoc-mcp"],
       "env": {
-        "BELINDOC_API_KEY": "ft_你的API密钥"
+        "BELINDOC_API_KEY": "ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
     }
   }
@@ -47,7 +47,7 @@ source .env && belindoc-mcp
       "type": "streamablehttp",
       "url": "http://mcp.belindoc.com/mcp",
       "headers": {
-        "Authorization": "Bearer ft_你的API密钥"
+        "Authorization": "Bearer ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
     }
   }
