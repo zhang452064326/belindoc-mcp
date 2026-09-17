@@ -12,9 +12,11 @@ import sys
 import time
 import httpx
 from typing import Optional
+from urllib.parse import unquote, urlsplit
 
 # 用户可见的产出串走消息表（九种语言），给模型看的指令仍是中文
 from .i18n import t
+from . import __version__
 
 # 上游 API 地址。默认生产环境——这个包发在 PyPI 上，装它的人默认就该打到生产；
 # 原先默认值是内部测试机的 IP，公开发布等于把它连同端口一起告诉所有人，而且外部
@@ -572,6 +574,19 @@ def _upload_expiry_note(url: str) -> str:
     )
 
 
+def watermark_of(url: str, requested: int):
+    """这份文件带不带水印：True 带，None 说不准。永远不回 False。
+
+    isWatermark=0 只是请求。实测上游对 0 和 1 回的是同一份文件，PDF 里印着
+    belindoc.com 水印，而我们照着参数说了「无水印」。能看出来的只有文件名：
+    上游生成的水印版带 _WM_。没有这个标记也不等于干净，所以没有 False。
+    """
+    if requested:
+        return True
+    name = unquote(urlsplit(url or "").path.rsplit("/", 1)[-1])
+    return True if "_WM_" in name else None
+
+
 def _expires_at(url: str) -> str:
     """签名链接的绝对过期时刻。相对时长在对话里会腐坏：模型说完「还有 60 分钟」，
     用户过几分钟才读到，转发给同事时更久，最后照着那个数去下载已经过期了。
@@ -809,6 +824,15 @@ def _account_key(api_key: str) -> str:
     return hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
 
 
+def forget_account(api_key: str) -> None:
+    """扣过费就把这个 key 的快照作废
+
+    提交前的限额校验会顺手把扣费前的余额缓存 5 分钟，翻译完用户一问余额，
+    get_account_status 读到的还是那份——看起来就像这单没扣钱。
+    """
+    _ACCOUNTS.pop(_account_key(api_key), None)
+
+
 def _prune_accounts() -> None:
     if len(_ACCOUNTS) <= _ACCOUNT_KEEP:
         return
@@ -840,7 +864,10 @@ _OCR_WALLET_KEYS = (
 
 
 def _free_used(total, used):
-    """今日免费额度用了多少 / 一共多少，外加一句「这数据不可信」
+    """本月免费额度用了多少 / 一共多少，外加一句「这数据不可信」
+
+    是按月不是按天：2026-09-17 生产上钱包接口回的 Redis key 是
+    user:free:translateQuota:month:9:<userId>，剩余 TTL 正好到 10 月 1 日。
 
     原先这里算的是「剩余」，然后拿它和钱包相加当可用额度。2026-09-04 实测推翻了
     那个前提：一单全走免费额度（上游记 freeTranslateQuota=1、walletTranslateQuota=0），
@@ -854,7 +881,7 @@ def _free_used(total, used):
     used = used or 0
     if used < 0 or used > total:
         return used, total, (
-            f"上游回的今日免费已用是 {used}，总量 {total}，这个数说不通。"
+            f"上游回的本月免费已用是 {used}，总量 {total}，这个数说不通。"
             "免费这一项以平台页面为准。"
         )
     return used, total, ""
@@ -886,7 +913,7 @@ def _build_account_snapshot(wallet_result, sub_result) -> dict:
         )
         if suspect:
             snapshot["quotaSuspect"] = suspect
-        # translateQuota 就是可用额度本身（已含今日免费的消耗），不要再加什么
+        # translateQuota 就是可用额度本身（已含本月免费的消耗），不要再加什么
         purse = wallet.get("translateQuota") or 0
 
         ocr_free_used, ocr_free_total, ocr_suspect = _free_used(
@@ -1276,6 +1303,10 @@ class TranslationClient:
                 # 不传这个头，上游的错误信息默认回英文。真实取值由
                 # _set_upstream_language 按本次调用的 locale 逐请求覆盖。
                 "language": "zh-CN",
+                # 别用库自带的 UA：belindoc.com 挂在 Cloudflare 后面，Python-urllib
+                # 这类库 UA 会被直接 403（error code 1010）。httpx 的眼下能过，
+                # 但那是同一类规则的运气，报自己的名字更稳。
+                "User-Agent": f"belindoc-mcp/{__version__}",
             },
             timeout=httpx.Timeout(30.0),  # 30秒超时
             # 逐请求改 language 头：上游的 msg 按这个头返回语种，而 locale 是
@@ -1645,15 +1676,17 @@ class TranslationClient:
 
                 # 状态见文档 5.2：0 未开始 / 1 解析中 / 2 翻译中 / 3 完成
                 if task_status == TASK_STATUS_DONE:
+                    # 扣费落在提交还是完成没实测过，两头都作废，别让人看到旧余额
+                    forget_account(self.api_key)
                     # 必须走下载接口拿地址，不能图省事直接用详情里的 targetFileUrl：
                     # 详情给的是上游默认生成的那份，文件名带 _WM_，是有水印的，而
                     # isWatermark 只对 getTranslateS3DownloadUrl 生效。
                     # 先要无水印，账号没这个权限再退回带水印。
                     download = await self.get_translate_s3_download_url(order_no, 2, 0)
-                    watermark = False
+                    requested = 0
                     if not download.get("url"):
                         download = await self.get_translate_s3_download_url(order_no, 2, 1)
-                        watermark = True
+                        requested = 1
 
                     variants = _available_variants(data)
                     target_url = download.get("url")
@@ -1662,7 +1695,8 @@ class TranslationClient:
                         # 两次都没拿到，最后退回详情里的地址（带水印）
                         target_url = variants.get(2)
                         target_url_cn = data.get("targetFileUrl2")
-                        watermark = True
+                        requested = 1
+                    watermark = watermark_of(target_url, requested)
 
                     total = record["totalElapsed"] + elapsed
                     _WAITS.pop(order_no, None)
@@ -1690,7 +1724,7 @@ class TranslationClient:
                         "downloadUrl": target_url,
                         "downloadUrlCN": target_url_cn,
                         "downloadNote": (
-                            t("download.doc.watermark" if watermark else "download.doc.clean")
+                            t("download.doc.watermark" if watermark else "download.doc.unverified")
                             + "downloadUrlCN 是同一份文件的国内兜底线路，"
                             "前者慢或不通时改用后者（对照版式也有国内线路，"
                             "get_document_translation_result 会一并返回 url2）。"
@@ -2087,6 +2121,7 @@ class TranslationClient:
         
         # 上游不返回订单号，提交后回查一次，避免调用方去翻列表
         if result.get("code") == "200":
+            forget_account(self.api_key)
             names = {f.get("fileName") for f in file_list}
             try:
                 recent = await self.search_translate_file_page(1, max(len(file_list), 5))
@@ -2163,9 +2198,10 @@ class TranslationClient:
         url_type: 1=原文, 2=纯译文, 3=横向对照, 4=纵向对照。
         默认 2——调用方要的通常是译文，取 1 会拿到原文。
 
-        is_watermark: 0=无水印（默认）, 1=带水印。不传这个参数就是走上游默认值，
+        is_watermark: 0=请求无水印（默认）, 1=带水印。不传这个参数就是走上游默认值，
         很可能拿到带水印的文件；能不能要无水印取决于账号权限，没权限时上游会回
-        [ERROR] 事件，这时改传 1。
+        [ERROR] 事件，这时改传 1。传 0 也不保证无水印（实测拿到过和 1 一样的文件），
+        返回的 watermark 只有 True / None，见 watermark_of。
 
         返回的 url 走 CloudFront，url2 走国内中转线路（部分存储类型为 null）。
         """
@@ -2232,10 +2268,12 @@ class TranslationClient:
             )
             return result
 
-        result["watermark"] = bool(is_watermark)
+        result["watermark"] = watermark_of(result.get("url"), is_watermark)
         result["expiresAt"] = _expires_at(result.get("url"))
         result["lineNote"] = (
-            ("这是带水印的版本。" if is_watermark else "这是无水印版本。")
+            ("这是带水印的版本。" if result["watermark"] else
+             "请求的是无水印版本，但服务端不确认水印真的去掉了（实测出现过照样带水印），"
+             "不要对用户说成「无水印」。")
             + "url 走 CloudFront；url2 为国内中转线路（部分存储类型为 null），"
             "海外线路不通时改用它。" + _URL_VERBATIM_NOTE
             + _expiry_note(result.get("url"))
@@ -2275,6 +2313,7 @@ class TranslationClient:
         )
         if result.get("code") in ("200", 200):
             _record_video_submit(source_file_object_key, target_language, result.get("data"))
+            forget_account(self.api_key)
             # 之前这里裸返上游 JSON，一句话都没有。上游其实给了真实时长和真实扣费，
             # 但都埋在几十个字段中间，调用方于是接着用自己之前猜的那个时长往下说
             # （把 21 秒说成 5 分 51 秒、4 额度说成 47 额度、还把本次消耗读成余额）。
@@ -2445,6 +2484,8 @@ class TranslationClient:
         if video_task_param:
             payload["videoTaskParam"] = video_task_param
         result = await self._post(f"{VIDEO_PREFIX}/submitVideoRewrite", payload)
+        if result.get("code") in ("200", 200):
+            forget_account(self.api_key)
         return result
     
     async def get_video_rewrite_detail(self, order_no: str) -> dict:
@@ -2575,6 +2616,7 @@ class TranslationClient:
             total = record["totalElapsed"] + elapsed
 
             if status == VIDEO_STATUS_DONE:
+                forget_account(self.api_key)
                 _WAITS.pop(order_no, None)
                 urls, rewrite = video_products(data)
                 target = urls.get("targetFileUrl")

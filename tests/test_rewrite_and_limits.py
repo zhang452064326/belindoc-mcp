@@ -92,7 +92,7 @@ async def test_account_status_reports_real_numbers():
     assert result["data"]["quota"]["wallet"] == 0
     assert result["data"]["quota"]["freeUsed"] == 6
     assert "可用额度 0" in result["msg"]
-    assert "今日免费已用 6/10" in result["msg"]
+    assert "本月免费已用 6/10" in result["msg"]
 
 
 @pytest.mark.asyncio

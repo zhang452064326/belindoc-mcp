@@ -170,8 +170,8 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 ### 接上之后
 
 调一次 `get_account_status` 验证密钥通不通，顺便看余额。想知道这个客户端支不支持服务端
-弹窗确认（关系到视频提交走一步还是两步），调一次 `probe_elicitation`——它不翻译、不提交
-任务、不扣额度。
+弹窗确认（关系到视频提交走一步还是两步），用 `MCP_DEBUG_TOOLS=1` 起服务，调一次
+`probe_elicitation`——它不翻译、不提交任务、不扣额度。
 
 ## 典型流程
 
@@ -228,6 +228,9 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 | `get_video_rewrite_status` | 查改写进度 |
 
 ### 排查
+
+默认不挂出来，设 `MCP_DEBUG_TOOLS=1` 才有。
+
 | 工具 | 说明 |
 |------|------|
 | `probe_elicitation` | 自检：这个客户端到底吃不吃 elicitation。不翻译、不提交、不扣额度 |
@@ -243,7 +246,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
   就用那一项的 `confirmToken` 重调一次，这一次才真的提交。
 
 之所以不能只信一个 `user_confirmed=true`：那种布尔量永远是模型自己填的，服务端无法验证
-背后到底有没有问过人。想知道某个客户端走哪条路，调一次 `probe_elicitation`。
+背后到底有没有问过人。想知道某个客户端走哪条路，开 `MCP_DEBUG_TOOLS=1` 调一次 `probe_elicitation`。
 
 ## 输出语言
 

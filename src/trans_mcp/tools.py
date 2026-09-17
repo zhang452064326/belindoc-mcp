@@ -1,6 +1,7 @@
 """MCP 工具定义"""
 
 import contextvars
+import os
 import sys
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -778,10 +779,10 @@ async def _account_status(client, refresh: bool = False) -> dict:
     limits = snapshot.get("limits") or {}
     parts = []
     if quota:
-        # 两个数分开报，不给合计：translateQuota 本来就含了今日免费的消耗，
+        # 两个数分开报，不给合计：translateQuota 本来就含了本月免费的消耗，
         # 加一次就是重复计（实测最多虚报 1200）。
         parts.append(f"可用额度 {quota.get('wallet')}")
-        parts.append(f"今日免费已用 {quota.get('freeUsed')}/{quota.get('freeTotal')}")
+        parts.append(f"本月免费已用 {quota.get('freeUsed')}/{quota.get('freeTotal')}")
         # 上游把 OCR 这组额度单独发一份，但 2026-09-04 在测试环境实测：一页扫描件
         # （isOcr=1）和一页文本 PDF（isOcr=0）各翻一单，四个字段的增减一模一样，
         # 连非 OCR 那单都把 useFreeOcrTranslateQuota 加了 1。数照报，但它不是
@@ -789,7 +790,7 @@ async def _account_status(client, refresh: bool = False) -> dict:
         if quota.get("ocrWallet") is not None:
             parts.append(
                 f"OCR 额度 {quota.get('ocrWallet')}"
-                f"（今日免费已用 {quota.get('ocrFreeUsed')}/{quota.get('ocrFreeTotal')}）"
+                f"（本月免费已用 {quota.get('ocrFreeUsed')}/{quota.get('ocrFreeTotal')}）"
             )
         if quota.get("advanced") is not None:
             parts.append(f"高级模型额度 {quota.get('advanced')}")
@@ -804,8 +805,8 @@ async def _account_status(client, refresh: bool = False) -> dict:
         parts.append(f"视频任务同时最多 {limits['videoConcurrency']} 个")
     msg = (
         "；".join(parts)
-        + "。这些数字请原样转述，一个都不要相加：可用额度那个数已经含了今日免费的"
-        "消耗，报「还剩多少」就报它；「今日免费已用」是用量计数，不是另一份余额，"
+        + "。这些数字请原样转述，一个都不要相加：可用额度那个数已经含了本月免费的"
+        "消耗，报「还剩多少」就报它；「本月免费已用」是用量计数，不是另一份余额，"
         "OCR 那组同理（实测和可用额度同步增减，走不走 OCR 都一样）。额度是账户余额，"
         "和某一单的实扣不是一回事。免费用户另有「每月累计视频时长」上限，"
         "本接口看不到，超了要到提交时才会被拒。"
@@ -963,7 +964,7 @@ TOOLS = [
     ),
     Tool(
         name="get_account_status",
-        description="查询账户的可用额度、会员档位和各项限额。要报余额、要判断「够不够翻这一单」时用它——额度数字必须来自本工具，不要从之前某一单的实扣去推算，两者不是一回事（那是本次消耗，不是余额）。返回里 quota.wallet 是可用额度，报余额就报它——它已经含了今日免费的消耗，别再拿 freeUsed/freeTotal 去加。freeUsed/freeTotal 是今日免费额度的用量计数，ocrWallet/ocrFreeUsed 是上游单独发的一组 OCR 数字（实测和 wallet 同步增减，走不走 OCR 都一样），这两组都不是另一份余额。advanced 是高级模型额度（get_model_list 里 coefficient>1 的那几个），归属还没实测过。limits 是当前会员档的硬限制：videoDurationMinutes 单个视频最长多少分钟、videoConcurrency 视频任务能同时跑几个、uploadFileSizeMB 单文件多大。这些限制服务端会真的按它拒绝提交，所以准备翻一个长视频之前先看一眼。注意免费用户另有「每月累计视频时长」上限，本接口看不到，只有提交时才会撞上。查不到时返回 code=500，请如实告诉用户查不到，不要拿估算值顶上。",
+        description="查询账户的可用额度、会员档位和各项限额。要报余额、要判断「够不够翻这一单」时用它——额度数字必须来自本工具，不要从之前某一单的实扣去推算，两者不是一回事（那是本次消耗，不是余额）。返回里 quota.wallet 是可用额度，报余额就报它——它已经含了本月免费的消耗，别再拿 freeUsed/freeTotal 去加。freeUsed/freeTotal 是本月免费额度的用量计数，ocrWallet/ocrFreeUsed 是上游单独发的一组 OCR 数字（实测和 wallet 同步增减，走不走 OCR 都一样），这两组都不是另一份余额。advanced 是高级模型额度（get_model_list 里 coefficient>1 的那几个），归属还没实测过。limits 是当前会员档的硬限制：videoDurationMinutes 单个视频最长多少分钟、videoConcurrency 视频任务能同时跑几个、uploadFileSizeMB 单文件多大。这些限制服务端会真的按它拒绝提交，所以准备翻一个长视频之前先看一眼。注意免费用户另有「每月累计视频时长」上限，本接口看不到，只有提交时才会撞上。查不到时返回 code=500，请如实告诉用户查不到，不要拿估算值顶上。",
         inputSchema={
             "type": "object",
             "properties": {
@@ -1078,7 +1079,7 @@ TOOLS = [
                 },
                 "is_watermark": {
                     "type": "integer",
-                    "description": "0=无水印（默认），1=带水印。无水印需要账号权限，若返回失败提示权限不足再改传 1。"
+                    "description": "0=请求无水印（默认），1=带水印。无水印需要账号权限，若返回失败提示权限不足再改传 1。传 0 不保证拿到的文件真没有水印：返回的 watermark 为 null 表示说不准，不能对用户说成「无水印」。"
                 }
             },
             "required": ["order_no"]
@@ -1357,11 +1358,6 @@ TOOLS = [
         }
     ),
     Tool(
-        name="probe_elicitation",
-        description="连通性自检工具，不翻译、不提交任务、不扣任何额度。用来验证服务端能否通过 MCP elicitation 直接向用户提问（而不是靠模型自己填 user_confirmed 声称问过了）。调用后会返回客户端声明的能力，并在支持时真的弹一次提问。只在排查这个问题时调用，正常翻译流程不要调。",
-        inputSchema={"type": "object", "properties": {}}
-    ),
-    Tool(
         name="get_video_rewrite_status",
         description="查询字幕改写任务的进度。上游是 SSE 流，本工具取第一帧数据就返回。状态含义同视频翻译：0 未开始 / 1 进行中 / 2 成功 / 3 失败 / 4 已取消。改写成功后回到原视频订单号调 wait_for_video_translation 或 get_video_translation_status 取产物，那边会带上改写版并说明产出。",
         inputSchema={
@@ -1376,6 +1372,25 @@ TOOLS = [
         }
     ),
 ]
+
+# 排查用的工具，生产上不挂出来：客户端会把它和正经工具摆在一起，模型见了就可能
+# 调，用户那边凭空弹一个「自检」提问。要用时设 MCP_DEBUG_TOOLS=1。
+DEBUG_TOOLS = [
+    Tool(
+        name="probe_elicitation",
+        description="连通性自检工具，不翻译、不提交任务、不扣任何额度。用来验证服务端能否通过 MCP elicitation 直接向用户提问（而不是靠模型自己填 user_confirmed 声称问过了）。调用后会返回客户端声明的能力，并在支持时真的弹一次提问。只在排查这个问题时调用，正常翻译流程不要调。",
+        inputSchema={"type": "object", "properties": {}}
+    ),
+]
+DEBUG_TOOL_NAMES = frozenset(t.name for t in DEBUG_TOOLS)
+
+
+def debug_tools_enabled() -> bool:
+    return os.environ.get("MCP_DEBUG_TOOLS", "").strip().lower() in ("1", "true", "yes")
+
+
+def listed_tools() -> list:
+    return TOOLS + DEBUG_TOOLS if debug_tools_enabled() else TOOLS
 
 
 # 用户可见的产出串（状态、产出说明、进度行、失败原因、下载说明）按 locale 输出，
@@ -1514,13 +1529,15 @@ def register_tools_per_request(server: Server, borrow):
     """
 
     async def handle_list_tools(ctx, params: PaginatedRequestParams) -> ListToolsResult:
-        return ListToolsResult(tools=TOOLS)
+        return ListToolsResult(tools=listed_tools())
 
     async def handle_call_tool(ctx, params: CallToolRequestParams) -> CallToolResult:
         tool_name = params.name
         args = params.arguments or {}
 
-        if tool_name not in TOOL_NAMES:
+        if tool_name not in TOOL_NAMES or (
+            tool_name in DEBUG_TOOL_NAMES and not debug_tools_enabled()
+        ):
             return CallToolResult(
                 content=[TextContent(type="text", text=f"未知工具: {tool_name}")]
             )
@@ -1545,4 +1562,4 @@ def register_tools_per_request(server: Server, borrow):
     server.add_request_handler("tools/call", CallToolRequestParams, handle_call_tool)
 
     # stdio 模式下 stdout 是 JSON-RPC 通道，任何多余输出都会污染协议流
-    print(f"已注册 {len(TOOLS)} 个工具", file=sys.stderr, flush=True)
+    print(f"已注册 {len(listed_tools())} 个工具", file=sys.stderr, flush=True)

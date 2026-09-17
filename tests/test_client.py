@@ -107,3 +107,47 @@ async def test_account_snapshot_degrades_when_endpoint_missing(client):
     snapshot = await client.account_snapshot()
     assert snapshot["ok"] is False
     assert video_duration_over_limit(99 * 60 * 1000, snapshot) is None
+
+
+@pytest.mark.parametrize("url,requested,expected", [
+    # 实测：传 0 拿回的照样是 _WM_ 那份，不能照参数说成无水印
+    ("https://cdn.example.com/a/report_WM_zh.pdf?Expires=1&Signature=x", 0, True),
+    ("https://cdn.example.com/a/report%5FWM%5Fzh.pdf?Expires=1", 0, True),
+    # 看不出标记也只能说「说不准」
+    ("https://cdn.example.com/a/report_zh.pdf?Expires=1", 0, None),
+    ("https://cdn.example.com/a/report_zh.pdf?Expires=1", 1, True),
+    # 签名参数里恰好出现 _WM_ 不算
+    ("https://cdn.example.com/a/report_zh.pdf?Signature=ab_WM_cd", 0, None),
+])
+def test_watermark_is_never_claimed_clean(url, requested, expected):
+    from trans_mcp.client import watermark_of
+
+    assert watermark_of(url, requested) is expected
+
+
+@pytest.mark.asyncio
+async def test_submit_drops_the_cached_balance(client):
+    """提交前的限额校验会把扣费前的余额缓存下来，扣完一问还是老数"""
+    from trans_mcp.client import _ACCOUNTS
+
+    _ACCOUNTS.clear()
+    balance = {"translateQuota": 120}
+
+    async def fake_post(path, payload, timeout=None):
+        if path.endswith("getMyWalletInfo"):
+            return {"code": "200", "data": dict(balance)}
+        if path.endswith("getMySubscriptionInfo"):
+            return {"code": "200", "data": {}}
+        return {"code": "200", "data": {"videoTranslateOrderNo": "VO1"}}
+
+    client._post = fake_post
+    assert (await client.account_snapshot())["quota"]["wallet"] == 120
+    balance["translateQuota"] = 112
+    await client.submit_video_rewrite("VO1", "a", "b")
+    assert (await client.account_snapshot())["quota"]["wallet"] == 112
+
+
+def test_upstream_requests_carry_our_own_user_agent(client):
+    """belindoc.com 在 Cloudflare 后面，Python-urllib 这类库 UA 直接 403（1010）"""
+    ua = client.client.headers["User-Agent"]
+    assert ua.startswith("belindoc-mcp/")

@@ -68,4 +68,4 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 
 调一次 `get_account_status` 验证密钥通不通，顺便看余额。
 想知道这个客户端支不支持服务端弹窗确认（关系到视频提交要走一步还是两步），
-调一次 `probe_elicitation`——它不翻译、不提交任务、不扣额度。
+用 `MCP_DEBUG_TOOLS=1` 起服务后调一次 `probe_elicitation`——它不翻译、不提交任务、不扣额度。

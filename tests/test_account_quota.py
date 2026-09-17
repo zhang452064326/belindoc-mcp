@@ -75,7 +75,7 @@ async def test_status_reports_the_two_numbers_separately():
     out = await _account_status(FakeClient(snap))
     assert "对不上" not in out["msg"]
     assert "可用额度 19635" in out["msg"]
-    assert "今日免费已用 200/1200" in out["msg"]
+    assert "本月免费已用 200/1200" in out["msg"]
     # 合计数一个都不许出现：19635 + 1000 = 20635
     assert "20635" not in out["msg"]
     assert "一个都不要相加" in out["msg"]

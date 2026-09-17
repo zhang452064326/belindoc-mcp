@@ -9,6 +9,7 @@
 | `MCP_HOST` | HTTP | `0.0.0.0` | 监听地址 |
 | `MCP_PORT` | HTTP | `8080` | 监听端口 |
 | `MCP_PATH` | HTTP | `/mcp` | MCP 服务端点路径。同域名下落地页占了 `/mcp` 时挪开，客户端 URL 要同步改 |
+| `MCP_DEBUG_TOOLS` | 都 | 不开 | 设 `1` 才挂出排查工具 `probe_elicitation`，生产别开 |
 | `MCP_LOCALE` | 都 | `zh` | 用户可见文案的语言：`zh` / `zh-Hant` / `en` / `ja` / `ko` / `de` / `fr` / `ru` / `ar` |
 
 两点容易踩：

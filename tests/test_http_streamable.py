@@ -18,7 +18,7 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamable_http_client
 
 from trans_mcp.http_server import TransMcpHttpServer
-from trans_mcp.tools import TOOLS
+from trans_mcp.tools import DEBUG_TOOLS, TOOLS
 
 
 @asynccontextmanager
@@ -69,6 +69,11 @@ def server():
     return TransMcpHttpServer(port=0)
 
 
+@pytest.fixture
+def debug_tools(monkeypatch):
+    monkeypatch.setenv("MCP_DEBUG_TOOLS", "1")
+
+
 @pytest.mark.asyncio
 async def test_health_needs_no_key(server):
     async with serving(server) as http:
@@ -96,7 +101,25 @@ async def test_a_real_client_can_handshake_and_list_tools(server):
 
 
 @pytest.mark.asyncio
-async def test_server_can_ask_the_user_directly(server):
+async def test_probe_tool_is_hidden_in_production(server, monkeypatch):
+    """自检工具摆出来，模型就可能去调，用户凭空收到一个「自检」弹窗"""
+    monkeypatch.delenv("MCP_DEBUG_TOOLS", raising=False)
+    async with connected(server) as session:
+        names = [t.name for t in (await session.list_tools()).tools]
+        called = await session.call_tool("probe_elicitation", {})
+    assert "probe_elicitation" not in names
+    assert "未知工具" in called.content[0].text
+
+
+@pytest.mark.asyncio
+async def test_probe_tool_comes_back_with_the_debug_flag(server, debug_tools):
+    async with connected(server) as session:
+        listed = await session.list_tools()
+    assert [t.name for t in listed.tools] == [t.name for t in TOOLS + DEBUG_TOOLS]
+
+
+@pytest.mark.asyncio
+async def test_server_can_ask_the_user_directly(server, debug_tools):
     """probe_elicitation 是为排查这件事写的：服务端能不能真问到人。
 
     以前在 HTTP 上它只会回一句「本传输发不出去」。现在必须真弹一次、并把用户
@@ -119,7 +142,7 @@ async def test_server_can_ask_the_user_directly(server):
 
 
 @pytest.mark.asyncio
-async def test_client_without_elicitation_is_told_so_not_silently_allowed(server):
+async def test_client_without_elicitation_is_told_so_not_silently_allowed(server, debug_tools):
     """客户端没声明能力时，服务端要说清楚「问不到人」，而不是当作同意"""
     async with connected(server) as session:
         out = tool_payload(await session.call_tool("probe_elicitation", {}))["data"]
@@ -130,7 +153,7 @@ async def test_client_without_elicitation_is_told_so_not_silently_allowed(server
 
 
 @pytest.mark.asyncio
-async def test_each_call_uses_the_key_from_its_own_request(server, monkeypatch):
+async def test_each_call_uses_the_key_from_its_own_request(server, monkeypatch, debug_tools):
     """会话是长的，key 是每个请求各带各的——不能记住握手时那一个一直用"""
     borrowed = []
     real_acquire = server.pool.acquire
