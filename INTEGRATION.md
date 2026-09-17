@@ -45,7 +45,7 @@ source .env && belindoc-mcp
   "mcpServers": {
     "belindoc": {
       "type": "streamablehttp",
-      "url": "http://mcp.belindoc.com/mcp",
+      "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
@@ -58,11 +58,13 @@ Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.
 
 ```toml
 [mcp_servers.belindoc]
-url = "http://mcp.belindoc.com/mcp"
+url = "https://mcp.belindoc.com/api/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
 
-服务端点默认 `/mcp`。服务器上设了 `MCP_PATH` 的话，这里的 URL 要跟着改。
+线上服务的端点是 `/api/mcp`，而且必须写 `https://`：`http://` 会被 301 跳到 https，
+多数 MCP 客户端不会带着 POST 跟跳，表现就是连不上；`https://mcp.belindoc.com/mcp` 则是 404。
+自己部署的服务端点默认 `/mcp`，设了 `MCP_PATH` 的话 URL 跟着改。
 
 ## 接上之后
 

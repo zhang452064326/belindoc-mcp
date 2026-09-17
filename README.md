@@ -150,7 +150,7 @@ stdio 这套配置在各家客户端里是同一个东西，换客户端只有�
   "mcpServers": {
     "belindoc": {
       "type": "streamablehttp",
-      "url": "http://mcp.belindoc.com/mcp",
+      "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
@@ -163,7 +163,7 @@ Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.
 
 ```toml
 [mcp_servers.belindoc]
-url = "http://mcp.belindoc.com/mcp"
+url = "https://mcp.belindoc.com/api/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
 

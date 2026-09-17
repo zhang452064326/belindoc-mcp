@@ -151,3 +151,19 @@ def test_upstream_requests_carry_our_own_user_agent(client):
     """belindoc.com 在 Cloudflare 后面，Python-urllib 这类库 UA 直接 403（1010）"""
     ua = client.client.headers["User-Agent"]
     assert ua.startswith("belindoc-mcp/")
+
+
+@pytest.mark.parametrize("tz", ["UTC", "Asia/Tokyo", "America/Los_Angeles", "Asia/Shanghai"])
+def test_membership_end_day_does_not_follow_the_host_timezone(monkeypatch, tz):
+    """endTime 是北京时间当天最后一毫秒，换台机器日期不能跟着变"""
+    import time as _time
+    from trans_mcp.client import _epoch_day
+
+    monkeypatch.setenv("TZ", tz)
+    _time.tzset()
+    try:
+        assert _epoch_day(1790783999999) == "2026-09-30"
+        assert _epoch_day(None) == ""
+    finally:
+        monkeypatch.undo()
+        _time.tzset()

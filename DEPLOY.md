@@ -79,14 +79,16 @@ chmod +x deploy.sh
 
 ### 3. 反向代理
 
-服务监听 `127.0.0.1:8080`，由 nginx 挂到 `mcp.belindoc.com`：
+服务监听 `127.0.0.1:8080`，由 nginx 挂到 `mcp.belindoc.com`。nginx 前面还有一层 Cloudflare，
+TLS 和 http→https 跳转都在 Cloudflare 做，所以 nginx 这里只听 80。线上的端点是 `/api/mcp`
+（`.env` 里 `MCP_PATH=/api/mcp`），nginx 的 location 必须和它一致：
 
 ```nginx
 server {
     listen 80;
     server_name mcp.belindoc.com;
 
-    location /mcp {
+    location /api/mcp {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
 
@@ -112,7 +114,7 @@ server {
 }
 ```
 
-改完 `nginx -t && systemctl reload nginx`，然后 `curl http://mcp.belindoc.com/health`
+改完 `nginx -t && systemctl reload nginx`，然后 `curl https://mcp.belindoc.com/health`
 确认通了再配客户端。
 
 只让 nginx 连得上的话，把服务的监听地址收到本机：在 `.env` 里设 `MCP_HOST=127.0.0.1`
@@ -127,7 +129,7 @@ server {
   "mcpServers": {
     "belindoc": {
       "type": "streamablehttp",
-      "url": "http://mcp.belindoc.com/mcp",
+      "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer 你的API密钥"
       }
@@ -145,7 +147,7 @@ Codex CLI 的 HTTP MCP 无法发送自定义请求头，只能用 Bearer；
 
 ```toml
 [mcp_servers.belindoc]
-url = "http://mcp.belindoc.com/mcp"
+url = "https://mcp.belindoc.com/api/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
 
@@ -168,7 +170,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 {
   "mcpServers": {
     "belindoc": {
-      "url": "http://mcp.belindoc.com/mcp",
+      "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_aaa..."
       }
@@ -180,7 +182,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 {
   "mcpServers": {
     "belindoc": {
-      "url": "http://mcp.belindoc.com/mcp",
+      "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_bbb..."
       }
@@ -193,16 +195,18 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 
 ## 端点路径
 
-服务端点默认是 `/mcp`。如果同域名下落地页已经占用了 `/mcp`，用 `MCP_PATH` 挪开：
+代码里的默认端点是 `/mcp`，但**线上用的是 `/api/mcp`**：`.env` 里 `MCP_PATH=/api/mcp`，
+`deploy.sh` / `deploy-linux.sh` 不传第二个参数时也是这个值。三处（`.env`、nginx 的
+location、客户端 URL）必须一致，改一处就得全改：
 
 ```bash
 MCP_PATH=/api/mcp ./server.sh start
 ```
 
-客户端 URL 相应改成 `http://mcp.belindoc.com/api/mcp`。
+客户端 URL 是 `https://mcp.belindoc.com/api/mcp`。`https://mcp.belindoc.com/mcp` 在线上是 404。
 
-服务挂在独立子域名 `mcp.belindoc.com` 上，`/mcp` 不会被落地页占用，所以这个变量
-一般用不着——它是留给「和落地页共用一个域名」那种部署的。
+客户端 URL 一定写 `https://`。`http://` 会被 Cloudflare 301 到 https，多数 MCP 客户端
+不会带着 POST 跟跳，表现就是连不上。
 
 ---
 

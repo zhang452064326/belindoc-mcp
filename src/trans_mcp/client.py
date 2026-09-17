@@ -2,6 +2,7 @@
 
 import asyncio
 import calendar
+import datetime
 import json
 import math
 import os
@@ -850,12 +851,22 @@ def _envelope_data(result) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+# 上游按北京时间落日期：会员到期的 endTime 是当天 23:59:59.999（UTC+8）。
+_UPSTREAM_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
 def _epoch_day(value) -> str:
-    """上游的时间戳是毫秒 epoch"""
+    """上游的时间戳是毫秒 epoch，日期按北京时间取
+
+    原来用 time.localtime，结果跟着跑服务的机器走：2026-09-17 实测同一个
+    endTime（北京时间 09-30 23:59:59），UTC 的线上服务器说 09-30，东京的
+    本机说 10-01。
+    """
     try:
-        return time.strftime("%Y-%m-%d", time.localtime(float(value) / 1000))
-    except (TypeError, ValueError, OSError):
+        at = datetime.datetime.fromtimestamp(float(value) / 1000, _UPSTREAM_TZ)
+    except (TypeError, ValueError, OSError, OverflowError):
         return ""
+    return at.strftime("%Y-%m-%d")
 
 
 _OCR_WALLET_KEYS = (

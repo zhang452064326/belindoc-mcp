@@ -9,8 +9,8 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 PORT=${1:-8080}
-# 落地页可能已占用 /mcp，服务端点可以让开；用法: ./deploy.sh [端口] [路径]
-MCP_PATH=${2:-/mcp}
+# 线上端点是 /api/mcp（nginx 的 location 和客户端 URL 都按它配），别改回 /mcp；用法: ./deploy.sh [端口] [路径]
+MCP_PATH=${2:-/api/mcp}
 INSTALL_DIR="/opt/trans-mcp"
 
 echo -e "${GREEN}=== Trans MCP Server 部署 ===${NC}"
@@ -66,7 +66,7 @@ echo ""
 IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')
 echo "MCP 端点: http://$IP:$PORT$MCP_PATH"
 echo "健康检查: http://$IP:$PORT/health"
-echo "对外地址: http://mcp.belindoc.com$MCP_PATH （经 nginx 反代，见 DEPLOY.md）"
+echo "对外地址: https://mcp.belindoc.com$MCP_PATH （经 nginx 反代，见 DEPLOY.md）"
 echo ""
 echo -e "${YELLOW}本机配置:${NC}"
 cat << EOF
@@ -74,7 +74,7 @@ cat << EOF
   "mcpServers": {
     "trans-mcp": {
       "type": "streamablehttp",
-      "url": "http://mcp.belindoc.com$MCP_PATH",
+      "url": "https://mcp.belindoc.com$MCP_PATH",
       "headers": { "Authorization": "Bearer 你的API密钥" }
     }
   }
