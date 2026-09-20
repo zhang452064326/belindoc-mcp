@@ -26,7 +26,7 @@ from . import __version__
 DEFAULT_API_BASE_URL = "https://belindoc.com/api"
 API_BASE_URL = os.environ.get("BELINDOC_API_BASE_URL", "").strip().rstrip("/") or DEFAULT_API_BASE_URL
 DOC_PREFIX = "/external/translate"
-# 提交文档/视频翻译任务时放进请求体，上游据此把任务记成「MCP 调用」
+# 提交文档/视频翻译、字幕改写任务时放进请求体，上游据此把任务记成「MCP 调用」
 # （CallSourceEnum.MCP），只影响统计。上游直接采用客户端传的值，不带就走它的默认值。
 CALL_SOURCE_MCP = 3
 # 上游瞬时错误码，重试即可（见上游开放 API 文档的「常见错误」一节）：
@@ -2496,6 +2496,7 @@ class TranslationClient:
             "videoTranslateOrderNo": order_no,
             "sourceSubtitlesTxt": source_subtitles_txt,
             "targetSubtitlesTxt": target_subtitles_txt,
+            "callSource": CALL_SOURCE_MCP,
         }
         if video_task_param:
             payload["videoTaskParam"] = video_task_param

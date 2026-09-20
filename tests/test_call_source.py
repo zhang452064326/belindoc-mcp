@@ -48,3 +48,18 @@ async def test_video_submit_marks_call_source_as_mcp():
     )
     payload = next(p for u, p in calls if u.endswith("submitVideoTranslate"))
     assert payload["callSource"] == 3
+
+
+@pytest.mark.asyncio
+async def test_video_rewrite_marks_call_source_as_mcp():
+    c = TranslationClient("test_api_key")
+    calls = []
+
+    async def fake_post(path, payload, timeout=None):
+        calls.append((path, payload))
+        return {"code": "500", "msg": "x"}
+
+    c._post = fake_post
+    await c.submit_video_rewrite("VT20260101_1_1", "a\n", "b\n")
+    payload = next(p for u, p in calls if u.endswith("submitVideoRewrite"))
+    assert payload["callSource"] == 3

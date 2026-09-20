@@ -1,3 +1,3 @@
 """Trans MCP - 文档翻译 MCP 服务"""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
