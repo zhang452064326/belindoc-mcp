@@ -1,0 +1,57 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.belindoc/belindoc-mcp",
+  "title": "Belindoc Translator",
+  "description": "Translate PDF, Word, Excel, Markdown, image and video files with Belindoc, and rewrite subtitles.",
+  "version": "0.1.7",
+  "websiteUrl": "https://belindoc.com/mcp",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "belindoc-mcp",
+      "version": "0.1.7",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "BELINDOC_API_KEY",
+          "description": "Belindoc API key (ft_ + 40 chars). Create one at belindoc.com → Open Platform → API Keys.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "MCP_LOCALE",
+          "description": "Language of user-facing messages (task status, progress, errors).",
+          "isRequired": false,
+          "default": "zh",
+          "choices": ["zh", "zh-Hant", "en", "ja", "ko", "de", "fr", "ru", "ar"]
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.belindoc.com/api/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Belindoc API key as a Bearer token.",
+          "isRequired": true,
+          "isSecret": true,
+          "value": "Bearer {api_key}",
+          "variables": {
+            "api_key": {
+              "description": "Belindoc API key (ft_ + 40 chars). Create one at belindoc.com → Open Platform → API Keys.",
+              "isRequired": true,
+              "isSecret": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

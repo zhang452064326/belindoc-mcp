@@ -1,5 +1,7 @@
 # Trans MCP Server
 
+<!-- mcp-name: com.belindoc/belindoc-mcp -->
+
 Belindoc 翻译开放 API 的 MCP 服务：文档（PDF / Word / Excel / Markdown / 图片）和视频翻译、
 字幕改写。
 
