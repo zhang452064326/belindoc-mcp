@@ -12,7 +12,7 @@
 ```json
 {
   "mcpServers": {
-    "trans-mcp": {
+    "belindoc-mcp": {
       "command": "uvx",
       "args": ["belindoc-mcp"],
       "env": {
@@ -43,8 +43,8 @@ source .env && belindoc-mcp
 ```json
 {
   "mcpServers": {
-    "belindoc": {
-      "type": "streamablehttp",
+    "belindoc-mcp": {
+      "type": "http",
       "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -54,10 +54,12 @@ source .env && belindoc-mcp
 }
 ```
 
+`type` 的取值因客户端而异，Claude Code 填 `http`，其他客户端以其当前文档为准。Streamable HTTP 是协议名，不是要填进配置的值。
+
 Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.codex/config.toml`：
 
 ```toml
-[mcp_servers.belindoc]
+[mcp_servers.belindoc-mcp]
 url = "https://mcp.belindoc.com/api/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```

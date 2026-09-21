@@ -127,8 +127,8 @@ server {
 ```json
 {
   "mcpServers": {
-    "belindoc": {
-      "type": "streamablehttp",
+    "belindoc-mcp": {
+      "type": "http",
       "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer 你的API密钥"
@@ -138,6 +138,8 @@ server {
 }
 ```
 
+`type` 的取值因客户端而异，Claude Code 填 `http`，其他客户端以其当前文档为准。Streamable HTTP 是协议名，不是要填进配置的值。
+
 ### 认证方式
 
 统一使用标准的 `Authorization: Bearer <key>` 请求头。
@@ -146,7 +148,7 @@ Codex CLI 的 HTTP MCP 无法发送自定义请求头，只能用 Bearer；
 若走 `~/.codex/config.toml`，写法为：
 
 ```toml
-[mcp_servers.belindoc]
+[mcp_servers.belindoc-mcp]
 url = "https://mcp.belindoc.com/api/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
@@ -169,7 +171,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 // 张三的配置
 {
   "mcpServers": {
-    "belindoc": {
+    "belindoc-mcp": {
       "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_aaa..."
@@ -181,7 +183,7 @@ bearer_token_env_var = "BELINDOC_API_KEY"
 // 李四的配置
 {
   "mcpServers": {
-    "belindoc": {
+    "belindoc-mcp": {
       "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_bbb..."

@@ -72,8 +72,8 @@ echo -e "${YELLOW}本机配置:${NC}"
 cat << EOF
 {
   "mcpServers": {
-    "trans-mcp": {
-      "type": "streamablehttp",
+    "belindoc-mcp": {
+      "type": "http",
       "url": "https://mcp.belindoc.com$MCP_PATH",
       "headers": { "Authorization": "Bearer 你的API密钥" }
     }

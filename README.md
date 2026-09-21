@@ -148,8 +148,8 @@ stdio 这套配置在各家客户端里是同一个东西，换客户端只有�
 ```json
 {
   "mcpServers": {
-    "belindoc": {
-      "type": "streamablehttp",
+    "belindoc-mcp": {
+      "type": "http",
       "url": "https://mcp.belindoc.com/api/mcp",
       "headers": {
         "Authorization": "Bearer ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
@@ -159,10 +159,12 @@ stdio 这套配置在各家客户端里是同一个东西，换客户端只有�
 }
 ```
 
+`type` 的取值因客户端而异，Claude Code 填 `http`，其他客户端以其当前文档为准。Streamable HTTP 是协议名，不是要填进配置的值。
+
 Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.codex/config.toml` 的话：
 
 ```toml
-[mcp_servers.belindoc]
+[mcp_servers.belindoc-mcp]
 url = "https://mcp.belindoc.com/api/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
