@@ -7,7 +7,7 @@
 服务端从 `BELINDOC_API_KEY` 读密钥。
 
 **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Codex** — `~/.codex/config.json`
+**Codex** — `~/.codex/config.toml`（TOML，键名 `mcp_servers`）
 
 ```json
 {

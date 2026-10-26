@@ -1,69 +1,77 @@
-# Trans MCP Server
+# Belindoc MCP Server
 
 <!-- mcp-name: com.belindoc/belindoc-mcp -->
 
-Belindoc 翻译开放 API 的 MCP 服务：文档（PDF / Word / Excel / Markdown / 图片）和视频翻译、
-字幕改写。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 两种运行方式
+An MCP server for the [Belindoc](https://belindoc.com/mcp) translation API. Translate PDF,
+Word, Excel, Markdown and image files, translate videos, and rewrite video subtitles — from
+Claude, Cursor, Codex or any other MCP client.
 
-| | stdio | HTTP 远程 |
+- **Website:** https://belindoc.com/mcp
+- **PyPI:** [`belindoc-mcp`](https://pypi.org/project/belindoc-mcp/)
+- **Remote endpoint:** `https://mcp.belindoc.com/api/mcp` (Streamable HTTP)
+
+## Two ways to run it
+
+| | stdio | Remote HTTP |
 |---|---|---|
-| 入口 | `belindoc-mcp` | `trans-mcp-http` |
-| 跑在哪 | 用户自己的机器上 | 一台服务器上，多人共用 |
-| API Key | 服务端从 `BELINDOC_API_KEY` 读 | 每个客户端自己带 `Authorization: Bearer <key>`，服务器不存任何密钥 |
-| 传输 | stdio | Streamable HTTP（SSE + `Mcp-Session-Id`） |
+| Entry point | `belindoc-mcp` | `trans-mcp-http` |
+| Runs on | the user's own machine | a server shared by many users |
+| API key | read from `BELINDOC_API_KEY` | each client sends `Authorization: Bearer <key>`; the server stores no keys |
+| Transport | stdio | Streamable HTTP (SSE + `Mcp-Session-Id`) |
 
-两种方式的工具、行为完全一致，包括服务端直接向用户弹窗确认（elicitation）和等待期间的
-进度通知。部署 HTTP 模式看 [DEPLOY.md](DEPLOY.md)。
+Both modes expose the same tools and behave the same way, including asking the user for
+confirmation directly (elicitation) and sending progress notifications while waiting.
+Self-hosting the HTTP mode is covered in [DEPLOY.md](DEPLOY.md).
 
-## 安装
+## Installation
 
-从 PyPI 装即可，不用 clone 源码：
+Install from PyPI — no need to clone the source:
 
 ```bash
-uvx belindoc-mcp       # 试跑一下；客户端配置里也直接这么写，不用预装
-# 或者
+uvx belindoc-mcp       # quick test run; client configs use this same command, no pre-install needed
+# or
 pipx install belindoc-mcp
 ```
 
-走 `uvx` 这条路得先有 uv——`uvx` 是它带的命令。没装过就先装：
+`uvx` comes with uv. If you don't have uv yet:
 
 ```bash
 # macOS / Linux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Windows（PowerShell）
+# Windows (PowerShell)
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-机器上已经有 Homebrew 或 pip 的话，`brew install uv`、`pip install uv` 也一样。
+`brew install uv` or `pip install uv` work too.
 
-**装完重开一个终端再往下走**，`uv` 要新开的 shell 才进得了 `PATH`。这步漏掉，后面客户端一
-律报找不到 `uvx`——是整个流程里最常见的失败原因，没有之一。
+**Open a new terminal after installing uv** — `uv` only lands on `PATH` in a new shell.
+Skipping this is by far the most common reason clients later fail with "uvx not found".
 
-用 `pipx` 那条路不需要 uv。
+The `pipx` route does not need uv.
 
-从源码装（开发、或要改代码）见 [开发](#开发)。
+To install from source (for development), see [Development](#development).
 
-## 环境变量
+## Environment variables
 
-| 变量 | 用在哪 | 说明 |
+| Variable | Mode | Description |
 |------|--------|------|
-| `BELINDOC_API_KEY` | stdio | 必需。格式 `ft_` + 40 位随机串，共 43 字符 |
-| `BELINDOC_API_BASE_URL` | 都 | 上游地址。不设即生产 `https://belindoc.com/api`；要打到别的环境才需要设 |
-| `MCP_HOST` / `MCP_PORT` | HTTP | 监听地址与端口，默认 `0.0.0.0:8080` |
-| `MCP_PATH` | HTTP | MCP 服务端点路径，默认 `/mcp`。同域名下落地页占了 `/mcp` 时挪开 |
-| `MCP_LOCALE` | 都 | 用户可见文案的语言，默认 `zh`。见下方「输出语言」 |
+| `BELINDOC_API_KEY` | stdio | Required. Format: `ft_` + 40 random characters (43 in total) |
+| `BELINDOC_API_BASE_URL` | both | Upstream API. Defaults to production `https://belindoc.com/api`; only set it to target another environment |
+| `MCP_HOST` / `MCP_PORT` | HTTP | Listen address and port, default `0.0.0.0:8080` |
+| `MCP_PATH` | HTTP | MCP endpoint path, default `/mcp` |
+| `MCP_LOCALE` | both | Language of user-facing messages, default `zh`. See [Output language](#output-language) |
 
-HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器的 `.env`。
-完整注释见 [.env.example](.env.example)。
+HTTP mode does **not** read `BELINDOC_API_KEY` — don't put a real key in the server's `.env`.
+See [.env.example](.env.example) for the annotated list.
 
-### 获取 API Key
+### Getting an API key
 
-登录 https://belindoc.com → 「开放平台」→「API Key 管理」→ 创建。
+Sign in at https://belindoc.com → Open Platform → API Keys → Create.
 
-## 客户端接入
+## Client setup
 
 ### stdio
 
@@ -83,69 +91,55 @@ HTTP 模式**不读** `BELINDOC_API_KEY`——别把真实 key 写进服务器�
 }
 ```
 
-`BELINDOC_API_BASE_URL` 填的就是默认值，不写也一样；要打到别的环境才改它。
+`BELINDOC_API_BASE_URL` is set to its default here and can be omitted.
 
-配置文件位置：Claude Desktop 是 `~/Library/Application Support/Claude/claude_desktop_config.json`，
-Codex 是 `~/.codex/config.json`。
-
-不想手改 JSON 的话，两个客户端都有命令行可以一把加：
+Claude Code and Codex can add it from the command line instead:
 
 ```bash
 # Claude Code
 claude mcp add belindoc-mcp \
   -e BELINDOC_API_KEY=ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  -e BELINDOC_API_BASE_URL=https://belindoc.com/api \
   -- uvx belindoc-mcp
 
 # Codex
 codex mcp add belindoc-mcp \
   --env BELINDOC_API_KEY=ft_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
-  --env BELINDOC_API_BASE_URL=https://belindoc.com/api \
   -- uvx belindoc-mcp
 ```
 
-两条只差传环境变量的写法：`claude` 用 `-e`，`codex` 用 `--env`。`--` 后面是真正要跑的命令，
-别漏。
+The only difference is how env vars are passed: `-e` for `claude`, `--env` for `codex`.
+Everything after `--` is the command to run — don't drop it.
 
-`uvx` 会自己拉包、自己建隔离环境，用户不用预装本项目，也不用管路径——代价是机器上得先有
-uv 本身，见上面的[安装](#安装)。
+`uvx` fetches the package and creates an isolated environment on its own, so users don't
+need to pre-install this project or deal with paths — they only need uv itself (see
+[Installation](#installation)).
 
-**从源码装的话**，`command` 必须填绝对路径——`pip install -e .` 之后 venv 里会生成
-`belindoc-mcp` 这个可执行文件，填它的完整路径（形如
-`/path/to/trans-mcp/.venv/bin/belindoc-mcp`）。客户端不走登录 shell，`PATH` 里通常没有
-这个 venv，写裸命令名会起不来。
+**When installed from source**, `command` must be an absolute path: after `pip install -e .`
+the venv contains a `belindoc-mcp` executable — use its full path (e.g.
+`/path/to/trans-mcp/.venv/bin/belindoc-mcp`). Clients don't start a login shell, so a bare
+command name usually won't be found on `PATH`.
 
-不想把 key 写进客户端配置的话，也可以放进项目根目录的 `.env`，启动时自己加载：
+### Other clients
 
-```bash
-cp .env.example .env   # 填入 API Key
-source .env && belindoc-mcp
-```
+The stdio config is the same across clients. Only the config file location and the top-level
+key differ:
 
-### 其他客户端
-
-stdio 这套配置在各家客户端里是同一个东西，换客户端只有三处要对：配置文件在哪、顶层的键叫
-什么、以及那三行本项目自己的内容（`command: uvx`、`args: ["belindoc-mcp"]`、`env` 里的两个
-变量）。第三项到哪都一样，抄上面的 JSON 即可。
-
-前两项：
-
-| 客户端 | 配置文件 | 顶层键 |
+| Client | Config file | Top-level key |
 |--------|----------|--------|
 | Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers` |
-| Claude Code | 项目根 `.mcp.json`（或直接 `claude mcp add`） | `mcpServers` |
-| Codex | `~/.codex/config.json`（或直接 `codex mcp add`） | `mcpServers` |
-| Cursor | 项目 `.cursor/mcp.json`，或全局 `~/.cursor/mcp.json` | `mcpServers` |
+| Claude Code | `.mcp.json` in the project root (or `claude mcp add`) | `mcpServers` |
+| Codex | `~/.codex/config.toml` (TOML; or `codex mcp add`) | `mcp_servers` |
+| Cursor | `.cursor/mcp.json` in the project, or global `~/.cursor/mcp.json` | `mcpServers` |
 | Windsurf | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
-| VS Code | 项目 `.vscode/mcp.json` | `servers` |
+| VS Code | `.vscode/mcp.json` in the project | `servers` |
 
-这张表会过期——各家的路径和键名都改过不止一次，装之前对一眼自己客户端的当前文档。跟本项目
-有关的部分不会变。
+Clients change these paths from time to time — check your client's current docs.
 
-装完起不来，先查两条：`uvx` 在不在客户端能看到的 `PATH` 里（客户端不走登录 shell，装完 uv
-没重开终端最常见），以及 key 有没有填对。
+If it won't start, check two things first: whether `uvx` is on the `PATH` the client sees
+(most often: uv was installed but the terminal wasn't reopened), and whether the key is
+correct.
 
-### HTTP 远程
+### Remote HTTP
 
 ```json
 {
@@ -161,9 +155,11 @@ stdio 这套配置在各家客户端里是同一个东西，换客户端只有�
 }
 ```
 
-`type` 的取值因客户端而异，Claude Code 填 `http`，其他客户端以其当前文档为准。Streamable HTTP 是协议名，不是要填进配置的值。
+The value of `type` varies by client: Claude Code uses `http`; check other clients' docs.
+"Streamable HTTP" is the protocol name, not a config value.
 
-Codex CLI 的 HTTP MCP 发不了自定义请求头，只能用 Bearer；走 `~/.codex/config.toml` 的话：
+Codex CLI can't send custom headers for HTTP MCP servers, only a bearer token. In
+`~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.belindoc-mcp]
@@ -171,118 +167,125 @@ url = "https://mcp.belindoc.com/api/mcp"
 bearer_token_env_var = "BELINDOC_API_KEY"
 ```
 
-### 接上之后
+### After connecting
 
-调一次 `get_account_status` 验证密钥通不通，顺便看余额。想知道这个客户端支不支持服务端
-弹窗确认（关系到视频提交走一步还是两步），用 `MCP_DEBUG_TOOLS=1` 起服务，调一次
-`probe_elicitation`——它不翻译、不提交任务、不扣额度。
+Call `get_account_status` once to check the key works and see your balance. To find out
+whether your client supports server-side confirmation prompts (which decides whether video
+submission takes one call or two), start the server with `MCP_DEBUG_TOOLS=1` and call
+`probe_elicitation` — it doesn't translate, submit or charge anything.
 
-## 典型流程
+## Typical workflows
 
-**文档**：`upload_document` 取预签名链接 → 按返回的 `uploadCommand` 上传 →
-（PDF 才要）`check_pdf_ocr` 看是不是扫描件 → `translate_document` 提交 →
-`wait_for_translation` 跟进 → `get_document_translation_result` 取下载链接。
+**Documents:** `upload_document` to get a presigned URL → upload with the returned
+`uploadCommand` → (PDF only) `check_pdf_ocr` to detect scanned PDFs → `translate_document`
+→ `wait_for_translation` → `get_document_translation_result` for the download link.
 
-**视频**：`upload_video` → 上传 → `calculate_video_translation_quota` 试算 →
-`translate_video` 提交（两步确认，见下）→ `wait_for_video_translation` 跟进。
-想改字幕重出一版：`get_video_subtitles` → `calculate_rewrite_quota` →
-`rewrite_video_subtitles` → `get_video_rewrite_status`。
+**Videos:** `upload_video` → upload → `calculate_video_translation_quota` to estimate cost →
+`translate_video` (two-step confirmation, see below) → `wait_for_video_translation`.
+To edit subtitles and re-render: `get_video_subtitles` → `calculate_rewrite_quota` →
+`rewrite_video_subtitles` → `get_video_rewrite_status`.
 
-上传由调用方自己执行返回的 `uploadCommand`，服务端不碰用户机器上的文件；下载给的是
-签名链接，问号后面的签名参数一个字符都不能改，截掉就是 403。
+The caller runs the returned `uploadCommand` itself; the server never touches files on the
+user's machine. Download links are signed URLs — don't change a single character after the
+`?`, or you'll get a 403.
 
-## 工具列表
+## Tools
 
-### 账户与元信息
-| 工具 | 说明 |
+### Account and metadata
+| Tool | Description |
 |------|------|
-| `get_supported_languages` | 支持的语言列表（79 种，语言码 → 显示名） |
-| `get_model_list` | 当前账户可用的翻译模型 |
-| `get_account_status` | 可用额度、会员档位、各项限额（单视频时长 / 并发数 / 单文件大小） |
+| `get_supported_languages` | Supported languages (79, language code → display name) |
+| `get_model_list` | Translation models available to the account |
+| `get_account_status` | Remaining quota, membership tier and limits (max video length / concurrency / file size) |
 
-### 文档翻译
-| 工具 | 说明 |
+### Document translation
+| Tool | Description |
 |------|------|
-| `upload_document` | 取文档的预签名上传链接 |
-| `check_pdf_ocr` | 判断已上传的 PDF 是不是扫描件 / 双层 PDF |
-| `translate_document` | 提交文档翻译任务 |
-| `wait_for_translation` | 等待任务完成，进度一有变化就返回 |
-| `get_document_translation_status` | 查单个任务状态 |
-| `get_document_translation_result` | 取译文下载链接 |
-| `list_document_translations` | 分页查任务列表 |
-| `get_document_translation_by_batch` | 按批次号查任务 |
+| `upload_document` | Get a presigned upload URL for a document |
+| `check_pdf_ocr` | Check whether an uploaded PDF is scanned / dual-layer |
+| `translate_document` | Submit a document translation task |
+| `wait_for_translation` | Wait for a task, returning whenever progress changes |
+| `get_document_translation_status` | Get one task's status |
+| `get_document_translation_result` | Get the translated file's download link |
+| `list_document_translations` | List tasks (paginated) |
+| `get_document_translation_by_batch` | Get tasks by batch number |
 
-### 视频翻译
-| 工具 | 说明 |
+### Video translation
+| Tool | Description |
 |------|------|
-| `upload_video` | 取视频的预签名上传地址 |
-| `calculate_video_translation_quota` | 试算要花多少额度，不扣费 |
-| `translate_video` | 提交视频翻译任务（会真扣额度，两步确认） |
-| `wait_for_video_translation` | 等待任务完成，进度一有变化就返回 |
-| `get_video_translation_status` | 查单个任务状态 |
-| `list_video_translations` | 分页查任务列表（只有最近 15 天） |
-| `cancel_video_translation` | 取消任务 |
+| `upload_video` | Get a presigned upload URL for a video |
+| `calculate_video_translation_quota` | Estimate the quota cost without charging |
+| `translate_video` | Submit a video translation task (charges quota; two-step confirmation) |
+| `wait_for_video_translation` | Wait for a task, returning whenever progress changes |
+| `get_video_translation_status` | Get one task's status |
+| `list_video_translations` | List tasks (paginated; last 15 days only) |
+| `cancel_video_translation` | Cancel a task |
 
-### 字幕改写
-| 工具 | 说明 |
+### Subtitle rewriting
+| Tool | Description |
 |------|------|
-| `get_video_subtitles` | 取原文与译文字幕下载地址 |
-| `calculate_rewrite_quota` | 试算改写要花多少额度，不扣费 |
-| `rewrite_video_subtitles` | 用编辑后的字幕重新生成视频（会真扣额度，两步确认） |
-| `get_video_rewrite_status` | 查改写进度 |
+| `get_video_subtitles` | Get download URLs for source and translated subtitles |
+| `calculate_rewrite_quota` | Estimate the rewrite cost without charging |
+| `rewrite_video_subtitles` | Re-render the video with edited subtitles (charges quota; two-step confirmation) |
+| `get_video_rewrite_status` | Get rewrite progress |
 
-### 排查
+### Diagnostics
 
-默认不挂出来，设 `MCP_DEBUG_TOOLS=1` 才有。
+Hidden by default; set `MCP_DEBUG_TOOLS=1` to expose it.
 
-| 工具 | 说明 |
+| Tool | Description |
 |------|------|
-| `probe_elicitation` | 自检：这个客户端到底吃不吃 elicitation。不翻译、不提交、不扣额度 |
+| `probe_elicitation` | Self-check: does this client support elicitation? No translation, no submission, no charge |
 
-## 扣费确认
+## Charge confirmation
 
-`translate_video` 和 `rewrite_video_subtitles` 会真扣额度，所以提交是**两步**，第一次
-一定不会提交：
+`translate_video` and `rewrite_video_subtitles` spend quota, so submitting takes **two
+steps** — the first call never submits:
 
-- 客户端支持 **elicitation** 时，服务端直接弹窗问用户，一次调用即可；
-- 不支持时退回**确认码**：第一次调用返回 409 + 一段给用户看的话 + 一张菜单（配音 ×
-  字幕的各种组合，每格自带额度和 `confirmToken`），把菜单原样给用户看、他挑了哪一项，
-  就用那一项的 `confirmToken` 重调一次，这一次才真的提交。
+- If the client supports **elicitation**, the server asks the user directly and one call is
+  enough.
+- Otherwise it falls back to a **confirmation token**: the first call returns 409 with a
+  message for the user and a menu (combinations of dubbing × subtitles, each with its cost and
+  a `confirmToken`). Show the menu to the user as-is, then call again with the `confirmToken`
+  of the option they picked — only that call submits.
 
-之所以不能只信一个 `user_confirmed=true`：那种布尔量永远是模型自己填的，服务端无法验证
-背后到底有没有问过人。想知道某个客户端走哪条路，开 `MCP_DEBUG_TOOLS=1` 调一次 `probe_elicitation`。
+A plain `user_confirmed=true` flag isn't trusted because the model always fills it in itself;
+the server can't verify that a human was actually asked.
 
-## 输出语言
+## Output language
 
-会被念给用户听的那部分文案（任务状态、产出说明、进度行、失败原因、下载说明）支持九种
-语言：`zh` / `zh-Hant` / `en` / `ja` / `ko` / `de` / `fr` / `ru` / `ar`。工具描述和给模型
-的操作指令始终是中文——那是写给模型的。
+Text meant to be relayed to the user (task status, output descriptions, progress lines,
+failure reasons, download notes) is available in nine languages: `zh` / `zh-Hant` / `en` /
+`ja` / `ko` / `de` / `fr` / `ru` / `ar`. Tool descriptions and instructions for the model are
+always in Chinese — they're written for the model.
 
-优先级：工具参数 `locale` > 服务端 `MCP_LOCALE` > `zh`。
+Priority: the tool's `locale` argument > server `MCP_LOCALE` > `zh`.
 
-## 故障排除
+## Troubleshooting
 
-### 认证失败 (10004)
+### Authentication failed (10004)
 
-API Key 不对、没注册、或格式错（必须 `ft_` 开头共 43 字符）。先 `echo $BELINDOC_API_KEY`
-确认，再去平台看 key 的状态。
+The API key is wrong, unregistered, or malformed (it must start with `ft_` and be 43
+characters). Check `echo $BELINDOC_API_KEY`, then check the key's status on the platform.
 
-### 密钥类错误码 (30306 / 30307 / 30308 / 30309 / 30312)
+### Key errors (30306 / 30307 / 30308 / 30309 / 30312)
 
-这几个上游一律用 HTTP 200 送回来，业务码在响应体里。工具会把它们翻成一句可执行的话
-（key 没复制全 / 被禁用要重新启用 / 已过期 / IP 不在白名单 / 需联系客服），并明确标注
-**重试、换参数、重新上传都没有用**。只有 30311 是该退避重试的。
+The upstream returns these with HTTP 200 and the code in the body. The tools turn them into
+an actionable sentence (key not copied fully / disabled and needs re-enabling / expired / IP
+not allow-listed / contact support), and state clearly that **retrying, changing arguments
+or re-uploading won't help**. Only 30311 should be retried with backoff.
 
-### 接口不存在 (404)
+### Endpoint not found (404)
 
-返回里会写明「接口 X 在当前服务地址（Y）上不存在」。这不是网络故障，是该功能在这个环境
-没部署，或者 `BELINDOC_API_BASE_URL` 指错了环境。重试无用。
+The response says "endpoint X does not exist at the current service URL (Y)". This isn't a
+network problem — the feature isn't deployed in that environment, or
+`BELINDOC_API_BASE_URL` points to the wrong one. Retrying won't help.
 
-### 连接超时
+### Connection timeout
 
-检查后端是否在跑、网络是否通、防火墙是否放行。
+Check that the backend is reachable and no firewall is blocking it.
 
-## 开发
+## Development
 
 ```bash
 cd /path/to/trans-mcp
@@ -292,49 +295,13 @@ pip install -e ".[dev]"
 pytest tests/
 ```
 
-### 发布到 PyPI
+The PyPI package is `belindoc-mcp`; the repository directory and Python module are still
+called `trans-mcp` / `trans_mcp`, and the `trans-mcp` / `trans-mcp-http` commands are kept for
+existing deployment scripts.
 
-```bash
-pip install build twine
-python -m build            # 出 dist/*.whl 和 dist/*.tar.gz
-twine upload dist/*
-```
+Release notes for maintainers (publishing to PyPI, project layout) are in
+[README.zh-CN.md](README.zh-CN.md#开发).
 
-发之前先把 `pyproject.toml` 的 `version` 加上去——PyPI 的同一版本号只能传一次。
-`python -m build` 之前先 `rm -rf dist/`，否则旧版本会跟着一起传上去。
-
-包是公开的，所以别往仓库里放任何只该留在内部的东西：`README.md` 会原样变成 PyPI
-首页，`tests/` 会进 sdist。加内容前对着 `tar tzf dist/*.tar.gz` 看一眼。
-
-根目录的 `test_api.py` / `test_upload.py` 是手动连真实 API 的冒烟脚本，不是用例，
-pytest 只收集 `tests/`。
-
-### 项目结构
-
-PyPI 包名是 `belindoc-mcp`，仓库目录和 Python 模块仍叫 `trans-mcp` / `trans_mcp`——
-后两个用户看不见，跟着改要动 Dockerfile、systemd 单元和已在跑的服务器的升级路径。
-`trans-mcp` / `trans-mcp-http` 这两个命令也照旧留着，部署脚本在调它们。
-
-```
-trans-mcp/
-├── README.md              # 本文件
-├── DEPLOY.md              # HTTP 远程模式的部署
-├── INTEGRATION.md         # 客户端配置速查
-├── CONFIG.md              # 环境变量速查
-├── pyproject.toml
-├── .env.example
-├── src/trans_mcp/
-│   ├── server.py          # stdio 入口
-│   ├── http_server.py     # HTTP 入口（Streamable HTTP）
-│   ├── tools.py           # 工具定义与处理器（两种模式共用）
-│   ├── client.py          # 上游 API 客户端
-│   └── i18n.py            # 用户可见文案的九种语言
-├── tests/
-├── deploy.sh              # Docker 部署
-├── deploy-linux.sh        # systemd 部署
-└── server.sh              # 本机起停
-```
-
-## 许可证
+## License
 
 MIT License

@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "belindoc-mcp"
 version = "0.1.7"
-description = "Belindoc 文档 / 视频翻译的 MCP 服务"
+description = "MCP server for Belindoc: translate PDF, Word, Excel, Markdown, image and video files, and rewrite subtitles."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [{name = "zhangjun"}]
-keywords = ["mcp", "translation", "document", "video", "subtitle"]
+keywords = ["mcp", "mcp-server", "translation", "pdf-translation", "document", "video", "subtitle"]
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -37,7 +37,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://belindoc.com"
+Homepage = "https://belindoc.com/mcp"
+Repository = "https://github.com/zhang452064326/belindoc-mcp"
 
 # PyPI 包名是 belindoc-mcp，仓库目录和模块仍叫 trans-mcp / trans_mcp——后两个用户
 # 看不见，跟着改要动 Dockerfile 的 CMD、systemd 的 ExecStart 和已在跑的服务器的升级
